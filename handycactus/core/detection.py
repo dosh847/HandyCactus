@@ -74,6 +74,7 @@ class DetectionResult:
     patch: np.ndarray  # (T,) int patch label, -1 where not a support face
     blocked_islands: np.ndarray  # (B, 3) forced contacts removed by HC_Block
     warnings: list[str] = field(default_factory=list)
+    stats: dict[str, int] = field(default_factory=dict)  # counts after each stage, for diagnostics
 
 
 def overhang_severity(normals: np.ndarray, overhang_angle: float) -> np.ndarray:
@@ -115,15 +116,10 @@ def detect(
     sample_faces = support & ~face_block
 
     # Patches: support faces connected through shared edges.
-    fa, fb, edge_verts = mesh.face_edge_pairs()
+    fa, fb, _ = mesh.face_edge_pairs()
     both = support[fa] & support[fb]
     labels = connected_components(len(mesh.tris), fa[both], fb[both])
     patch = np.where(support, labels, -1)
-
-    # Supported patch boundaries: material continues downward on the other side.
-    seg_a, seg_b, seg_patch = _supported_boundaries(
-        mesh, support, near_bed | face_inside, patch, fa, fb, edge_verts
-    )
 
     # Forced contacts.
     vnormals = mesh.vertex_normals()
@@ -137,9 +133,7 @@ def detect(
 
     lowest, lowest_patch, lowest_face = _patch_lowest_vertices(mesh, patch)
     keep = ~_inside_other(mesh.verts[lowest], mesh.vert_target[lowest], inside)
-    keep &= _far_from_boundaries(
-        mesh.verts[lowest], lowest_patch, seg_a, seg_b, seg_patch, params.max_bridge / 2
-    )
+    keep &= ~_anchored(mesh.verts[lowest], inside, params.max_bridge)
     lowest, lowest_face = lowest[keep], lowest_face[keep]
     is_blocked = mesh.block_weights[lowest] > PAINT_THRESHOLD
     blocked.append(mesh.verts[lowest[is_blocked]])
@@ -167,10 +161,19 @@ def detect(
         raise TooManyContacts(estimate, float(area.sum()))
     rng = np.random.default_rng(seed)
     s_pos, s_face = _poisson_samples(mesh, sample_faces, spacing, forced_pos, rng)
+    stats = {
+        "support_faces": int(support.sum()),
+        "patches": int(len(np.unique(patch[patch >= 0]))),
+        "forced": int(len(forced_pos)),
+        "samples": int(len(s_pos)),
+    }
 
     # Bridging, then the inside filter at the sample points themselves.
-    keep = _far_from_boundaries(s_pos, patch[s_face], seg_a, seg_b, seg_patch, params.max_bridge / 2)
+    # Painted (HC_Force) samples are wanted by the user even where they could bridge.
+    keep = ~_anchored(s_pos, inside, params.max_bridge) | face_force[s_face]
+    stats["samples_after_bridging"] = int(keep.sum())
     keep &= ~_inside_other(s_pos, mesh.face_target[s_face], inside)
+    stats["samples_after_inside"] = int(keep.sum())
     s_pos, s_face = s_pos[keep], s_face[keep]
 
     contacts = Contacts(
@@ -179,7 +182,7 @@ def detect(
         target=np.concatenate([mesh.vert_target[forced_v], mesh.face_target[s_face]]),
         kind=np.concatenate([forced_kind, np.full(len(s_pos), SAMPLE)]).astype(np.int64),
     )
-    return DetectionResult(contacts, support, patch, np.concatenate(blocked), warnings)
+    return DetectionResult(contacts, support, patch, np.concatenate(blocked), warnings, stats)
 
 
 def _inside_other(points: np.ndarray, owner: np.ndarray, inside: Sequence[InsideTester | None]) -> np.ndarray:
@@ -224,56 +227,64 @@ def _patch_lowest_vertices(mesh: MeshData, patch: np.ndarray) -> tuple[np.ndarra
     return lowest_corner[order][first], face_patch[order][first], faces[order][first]
 
 
-def _supported_boundaries(mesh, support, attached, patch, fa, fb, edge_verts):
-    """Patch boundary edges where the neighbouring face continues downward.
+def _anchored(points: np.ndarray, inside: Sequence[InsideTester | None], span: float) -> np.ndarray:
+    """True where a point sits on a bridge no longer than `span` (max_bridge).
 
-    That neighbour holds the patch up, so short spans next to it can bridge.
-    Neighbours resting on the bed or buried in another target also count.
+    A bridge is held up from both sides: just below the point there must be
+    model material in two directions at least 120° apart, nearer together
+    than `span` in total (left gap + right gap). Material on one side only is
+    the overhang's own continuation, or a wall it cantilevers from; the
+    overhang angle already decides those. Anchors are probed at
+    `BRIDGE_DEPTH × span` below the point and at half that depth, so shallow
+    bumps and material across an air gap do not count. The bed never counts,
+    and open targets (no inside test) never anchor, which errs toward more
+    supports.
     """
-    a_in, b_in = support[fa], support[fb]
-    boundary = a_in != b_in
-    inner = np.where(a_in, fa, fb)[boundary]
-    outer = np.where(a_in, fb, fa)[boundary]
-    ev = edge_verts[boundary]
-    outer_tris = mesh.tris[outer]
-    # The outer face's vertex that is not on the shared edge.
-    is_edge_vert = (outer_tris == ev[:, :1]) | (outer_tris == ev[:, 1:])
-    far = outer_tris[np.arange(len(outer)), np.argmin(is_edge_vert, axis=1)]
-    edge_mid_z = mesh.verts[ev, 2].mean(axis=1)
-    goes_down = mesh.verts[far, 2] < edge_mid_z - _EPS
-    ok = goes_down | attached[outer]
-    return mesh.verts[ev[ok, 0]], mesh.verts[ev[ok, 1]], patch[inner[ok]]
+    n = len(points)
+    if n == 0 or span <= 0 or all(t is None for t in inside):
+        return np.zeros(n, dtype=bool)
+    shape = (n, len(_BRIDGE_RADII), _BRIDGE_AZIMUTHS)
+    # Deepest level first; shallower levels are only probed where it found material.
+    hit = None
+    for level in sorted(_BRIDGE_LEVELS, reverse=True):
+        offsets = _BRIDGE_DISC * span
+        offsets[:, 2] = -BRIDGE_DEPTH * level * span
+        probes = (points[:, None, :] + offsets[None, :, :]).reshape(-1, 3)
+        todo = np.ones(len(probes), dtype=bool) if hit is None else hit.ravel()
+        level_hit = np.zeros(len(probes), dtype=bool)
+        todo &= probes[:, 2] > 0
+        for tester in inside:
+            if tester is None:
+                continue
+            j = np.flatnonzero(todo & ~level_hit & in_bounds(probes, tester.bounds_min, tester.bounds_max))
+            if len(j):
+                level_hit[j] = tester.is_inside(probes[j])
+        hit = level_hit.reshape(shape)
+    # Nearest anchored material per direction, as a fraction of span (inf = none).
+    radii = np.array(_BRIDGE_RADII)[None, :, None]
+    nearest = np.where(hit, radii, np.inf).min(axis=1)  # (N, azimuths)
+    out = np.zeros(n, dtype=bool)
+    for a, b in _BRIDGE_OPPOSITE:
+        out |= nearest[:, a] + nearest[:, b] <= 1.0 + 1e-9
+    return out
 
 
-def _far_from_boundaries(points, point_patch, seg_a, seg_b, seg_patch, limit) -> np.ndarray:
-    """False where a point is within `limit` (3D) of a supported boundary of its own patch."""
-    keep = np.ones(len(points), dtype=bool)
-    if len(points) == 0 or len(seg_a) == 0 or limit <= 0:
-        return keep
-    seg_order = np.argsort(seg_patch, kind="stable")
-    seg_a, seg_b, seg_patch = seg_a[seg_order], seg_b[seg_order], seg_patch[seg_order]
-    uniq, starts = np.unique(seg_patch, return_index=True)
-    ends = np.append(starts[1:], len(seg_patch))
-    for p, s, e in zip(uniq, starts, ends, strict=True):
-        idx = np.flatnonzero(point_patch == p)
-        if len(idx) == 0:
-            continue
-        a, b = seg_a[s:e], seg_b[s:e]
-        for c in range(0, len(idx), 512):
-            sub = idx[c : c + 512]
-            d = _point_segment_distance(points[sub], a, b).min(axis=1)
-            keep[sub] = d > limit
-    return keep
-
-
-def _point_segment_distance(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """(P, 3) points, (S, 3) segments -> (P, S) distances."""
-    ab = b - a
-    denom = np.maximum(np.einsum("ij,ij->i", ab, ab), 1e-18)
-    ap = p[:, None, :] - a[None, :, :]
-    t = np.clip(np.einsum("psj,sj->ps", ap, ab) / denom, 0.0, 1.0)
-    closest = a[None, :, :] + t[..., None] * ab[None, :, :]
-    return np.linalg.norm(p[:, None, :] - closest, axis=2)
+BRIDGE_DEPTH = 0.4  # × span below the point (0.8 mm at the default 2 mm max_bridge)
+_BRIDGE_LEVELS = (0.5, 1.0)  # × BRIDGE_DEPTH
+_BRIDGE_RADII = tuple(k / 8 for k in range(1, 9))
+_BRIDGE_AZIMUTHS = 12
+_BRIDGE_DISC = np.array(
+    [
+        (r * np.cos(2 * np.pi * k / _BRIDGE_AZIMUTHS), r * np.sin(2 * np.pi * k / _BRIDGE_AZIMUTHS), 0.0)
+        for r in _BRIDGE_RADII
+        for k in range(_BRIDGE_AZIMUTHS)
+    ]
+)
+# Azimuth bin pairs at least 120° apart (4 of 12 bins).
+_BRIDGE_OPPOSITE = [
+    (a, b) for a in range(_BRIDGE_AZIMUTHS) for b in range(a + 1, _BRIDGE_AZIMUTHS)
+    if min(b - a, _BRIDGE_AZIMUTHS - (b - a)) >= _BRIDGE_AZIMUTHS // 3
+]  # fmt: skip
 
 
 def _poisson_samples(mesh, faces_mask, spacing, seeds, rng):

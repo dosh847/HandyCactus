@@ -38,40 +38,24 @@ def read_set(context, objects) -> MeshData:
 def inside_testers(context, objects, mesh: MeshData) -> list:
     """One BVH inside tester per closed target (None for open meshes).
 
-    Only targets whose bounds overlap another target's can ever be asked,
-    so the others skip the BVH build.
+    Every closed target needs one: besides overlaps between parts, the
+    bridging test asks whether a target's own material lies below a sample.
     """
     depsgraph = context.evaluated_depsgraph_get()
     scale = scene_mm_per_bu(context.scene)
-    bounds = [_bounds(mesh, i) for i in range(mesh.target_count)]
     testers = []
     for i, ob in enumerate(objects):
         if mesh.non_manifold_edge_count(i):
             testers.append(None)
             continue
-        lo, hi = bounds[i]
-        overlaps = any(
-            np.all(lo <= hi_j) and np.all(lo_j <= hi) for j, (lo_j, hi_j) in enumerate(bounds) if j != i
-        )
-        testers.append(
-            BVHInsideTester.from_object(ob, depsgraph, scale, lo, hi) if overlaps else _NeverInside(lo, hi)
-        )
+        lo, hi = _bounds(mesh, i)
+        testers.append(BVHInsideTester.from_object(ob, depsgraph, scale, lo, hi))
     return testers
 
 
 def _bounds(mesh: MeshData, i: int):
     v = mesh.verts[mesh.vert_target == i]
     return v.min(axis=0), v.max(axis=0)
-
-
-class _NeverInside:
-    """A closed target no other target reaches; it is never asked."""
-
-    def __init__(self, lo, hi):
-        self.bounds_min, self.bounds_max = lo, hi
-
-    def is_inside(self, points):
-        return np.zeros(len(points), dtype=bool)
 
 
 def lowest_point_mm(mesh: MeshData) -> float:

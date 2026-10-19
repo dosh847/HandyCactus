@@ -90,20 +90,23 @@ def test_short_bridge_is_supported_without_bridging():
     assert len(r.contacts) > 0
 
 
-def test_long_bridge_gets_contacts_away_from_the_pillars():
+def test_long_bridge_is_supported_across_its_whole_span():
+    # 6 mm is longer than max_bridge, so it is no bridge at all: contacts along the whole gap.
     gap = 6.0
     _, r = run(_bridge(gap))
     x = r.contacts.positions[:, 0]
-    assert len(x) > 0
-    assert np.all((x > 2 + 1.0 - 1e-9) & (x < 2 + gap - 1.0 + 1e-9))
+    assert len(x) > 5
+    assert x.min() < 2 + 1.0 and x.max() > 2 + gap - 1.0
 
 
-def test_cantilever_root_bridges_but_the_arm_is_supported():
+def test_cantilever_is_supported_right_up_to_its_root():
+    # One-sided anchoring is not a bridge: the overhang angle decides, so the
+    # arm's underside gets contacts all the way to the stem.
     tbar = voxels([((0, 0, 0), (2, 4, 7)), ((2, 0, 6), (10, 4, 7))])
     _, r = run(tbar)
     x = r.contacts.positions[:, 0]
     assert len(x) > 5
-    assert x.min() > 3.0 - 1e-9  # within max_bridge/2 of the stem is bridged
+    assert x.min() < 2.75
 
 
 def test_overlapping_part_gets_no_contacts_inside_the_other():
@@ -113,9 +116,9 @@ def test_overlapping_part_gets_no_contacts_inside_the_other():
     c = r.contacts
     assert len(c) > 0
     assert np.all(c.target == 1)
-    # The arm's underside inside the body is dropped, and the edge where it
-    # enters the body counts as supported, so the first mm bridges.
-    assert c.positions[:, 0].min() > 11.0 - 1e-9
+    # The arm's underside inside the body is dropped; outside it is supported
+    # right up to the body (one-sided, so not a bridge).
+    assert c.positions[:, 0].min() > 10.0 - 1e-9
 
 
 def test_open_target_skips_the_overlap_test_with_a_warning():
@@ -186,3 +189,33 @@ def test_metre_sized_model_is_refused_with_a_units_hint():
     huge = voxels([((0, 0, 1000), (10000, 10000, 2000))], voxel=1000.0)
     with pytest.raises(det.TooManyContacts, match="Units"):
         run(huge)
+
+
+def test_bumpy_underside_is_not_bridged():
+    # Small 0.5 mm bumps under a plate must not count as bridge anchors.
+    bumps = [((x, y, 9.5), (x + 0.5, y + 0.5, 10)) for x in range(1, 10, 2) for y in range(1, 10, 2)]
+    plate = voxels([((0, 0, 10), (11, 11, 12)), *bumps])
+    _, r = run(plate)
+    assert r.stats["samples_after_bridging"] >= 0.8 * r.stats["samples"]
+
+
+def test_part_below_an_air_gap_does_not_anchor():
+    # An upper plate 0.5 mm above a lower one (separate, not touching): no bridging.
+    upper = voxels([((0, 0, 8), (6, 6, 9))], name="upper")
+    lower = voxels([((0, 0, 4), (6, 6, 7.5))], name="lower")
+    _, r = run(upper, lower)
+    upper_contacts = r.contacts.positions[r.contacts.target == 0]
+    assert len(upper_contacts) > 10
+
+
+def test_sloped_plate_is_not_bridged_by_its_own_lower_edge():
+    # A thin plate tilted 30 degrees from horizontal: an overhang everywhere, anchored only
+    # by its own continuation on one side, so nothing is bridged.
+    from handycactus.core.mesh_data import TargetMesh
+
+    box = voxels([((0, 0, 0), (8, 6, 1))])
+    a = np.radians(30)
+    rot = np.array([[np.cos(a), 0, -np.sin(a)], [0, 1, 0], [np.sin(a), 0, np.cos(a)]])
+    v = box.verts @ rot.T + [0, 0, 8]
+    _, r = run(TargetMesh("plate", v, box.tris))
+    assert r.stats["samples_after_bridging"] == r.stats["samples"]
