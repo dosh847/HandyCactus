@@ -190,7 +190,8 @@ def test_check_and_frame_unreachable_findings(scene):
     # Errors are listed first; framing one puts the cursor on it.
     assert info.findings[0].severity == "ERROR"
     assert bpy.ops.handycactus.frame_finding(index=0) == {"FINISHED"}
-    assert tuple(bpy.context.scene.cursor.location) == pytest.approx(tuple(info.findings[0].location), abs=1e-4)
+    cursor = tuple(bpy.context.scene.cursor.location)
+    assert cursor == pytest.approx(tuple(info.findings[0].location), abs=1e-4)
     select_only(support)
     bpy.ops.handycactus.clear_supports()
     assert overlay.state.markers is None
