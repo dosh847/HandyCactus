@@ -121,3 +121,14 @@ class BVHObstacles:
                     out[i] = hit[3]
                     normals[i] = hit[1].normalized()
         return out, normals
+
+
+def first_hit(trees: list[BVHTree], origin, direction, max_distance: float = 1e9):
+    """Nearest hit over several BVHs: (distance, location, normal, tree index) or None."""
+    best = None
+    o, d = Vector(origin), Vector(direction).normalized()
+    for i, tree in enumerate(trees):
+        location, normal, _index, distance = tree.ray_cast(o, d, max_distance)
+        if location is not None and (best is None or distance < best[0]):
+            best = (distance, np.array(location), np.array(normal.normalized()), i)
+    return best

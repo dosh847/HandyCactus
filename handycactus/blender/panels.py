@@ -83,10 +83,21 @@ class HANDYCACTUS_PT_main(_HCPanel, Panel):
             if info.unreachable_count:
                 box.label(text=f"{info.unreachable_count} contact(s) unreachable", icon="ERROR")
             box.label(text="Targets: " + ", ".join(ob.name for ob in info.target_objects()))
+            _draw_editing(box, info)
             _draw_checks(box, info)
 
         for problem in settings_to_params(settings).problems():
             layout.label(text=problem, icon="ERROR")
+
+
+def _draw_editing(layout, info) -> None:
+    col = layout.column(align=True)
+    col.operator("handycactus.edit_supports", icon="EDITMODE_HLT")
+    row = col.row(align=True)
+    row.operator("handycactus.lock_all", text="Lock All", icon="LOCKED").locked = True
+    row.operator("handycactus.lock_all", text="Unlock All", icon="UNLOCKED").locked = False
+    if info.locked_count:
+        layout.label(text=f"{info.locked_count} locked tree(s) kept on Generate", icon="LOCKED")
 
 
 def _draw_checks(layout, info) -> None:

@@ -47,6 +47,8 @@ class _State:
     point_positions: np.ndarray | None = None
     markers: np.ndarray | None = None  # (M, 3) mm: check findings of the shown support set
     marker_colors: np.ndarray | None = None
+    edit_points: np.ndarray | None = None  # (E, 3) mm: Edit Supports hover / drag feedback
+    edit_colors: np.ndarray | None = None
     point_colors: np.ndarray | None = None
     batches: dict = field(default_factory=dict)
     batches_stale: bool = True
@@ -64,6 +66,30 @@ def set_preview(run) -> None:
     state.dirty = state.geometry_dirty = True
     _ensure_running()
     _rebuild()
+
+
+HOVER_COLOR = (1.0, 1.0, 1.0, 1.0)
+DRAG_COLOR = (1.0, 0.9, 0.1, 1.0)
+EDIT_POINT_SIZE = 12.0
+
+
+def set_edit_feedback(hover_mm, drag_mm) -> None:
+    """Highlight the hovered node and the node being dragged (None, None clears)."""
+    points, colors = [], []
+    if hover_mm is not None:
+        points.append(hover_mm)
+        colors.append(HOVER_COLOR)
+    if drag_mm is not None:
+        points.append(drag_mm)
+        colors.append(DRAG_COLOR)
+    state.edit_points = np.array(points, dtype=np.float64).reshape(-1, 3) if points else None
+    state.edit_colors = np.array(colors) if colors else None
+    if points:
+        _ensure_running()
+    state.batches_stale = True
+    _tag_redraw()
+    if not points:
+        _stop_if_idle()
 
 
 def set_findings(findings) -> None:
@@ -123,7 +149,11 @@ def current_set(context=None) -> list:
 
 
 def _has_points() -> bool:
-    return state.preview is not None or (state.markers is not None and len(state.markers) > 0)
+    return (
+        state.preview is not None
+        or (state.markers is not None and len(state.markers) > 0)
+        or state.edit_points is not None
+    )
 
 
 def _enabled(scene) -> bool:
@@ -325,6 +355,18 @@ def _make_batches() -> None:
             {"pos": state.point_positions.astype(np.float32), "color": state.point_colors.astype(np.float32)},
         )
         state.batches["points"] = (shader, batch)
+    if state.edit_points is not None:
+        scale = scene_mm_per_bu(bpy.context.scene)
+        shader = gpu.shader.from_builtin("POINT_FLAT_COLOR")
+        batch = batch_for_shader(
+            shader,
+            "POINTS",
+            {
+                "pos": (state.edit_points / scale).astype(np.float32),
+                "color": state.edit_colors.astype(np.float32),
+            },
+        )
+        state.batches["edit"] = (shader, batch)
     state.batches_stale = False
 
 
@@ -351,6 +393,12 @@ def _draw() -> None:
         gpu.state.point_size_set(POINT_SIZE)
         gpu.state.depth_test_set("ALWAYS")  # contacts sit on the surface; always show them
         shader, batch = state.batches["points"]
+        batch.draw(shader)
+        gpu.state.point_size_set(1.0)
+    if "edit" in state.batches:
+        gpu.state.point_size_set(EDIT_POINT_SIZE)
+        gpu.state.depth_test_set("ALWAYS")
+        shader, batch = state.batches["edit"]
         batch.draw(shader)
         gpu.state.point_size_set(1.0)
     gpu.state.depth_test_set("NONE")

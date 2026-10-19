@@ -11,7 +11,7 @@ import bpy
 import numpy as np
 from mathutils import Matrix
 
-from ..core import checks, detection, routing, tips
+from ..core import checks, detection, editing, routing, tips
 from ..core.graph import CONTACT, FOOT, LANDING
 from ..core.mesh_data import MeshData, combine
 from . import gn_builder, graph_io
@@ -119,7 +119,9 @@ def support_name(objects) -> str:
 def generate(context, objects, support=None) -> GenerateResult:
     """Detect, build tips, route and write a supports object for the target set.
 
-    `support` is an existing supports object to rebuild in place (Regenerate).
+    `support` is an existing supports object to rebuild in place (Regenerate). Its
+    locked trees (manually edited ones, or locked by hand) are kept as they are; new
+    contacts within half a tip spacing of a kept tip are dropped.
     """
     start = time.perf_counter()
     objects = mesh_targets(objects)
@@ -141,9 +143,22 @@ def generate(context, objects, support=None) -> GenerateResult:
     trees = [world_bvh(ob, depsgraph, scale) for ob in objects]
     found = detection.detect(mesh, params, _testers_from(trees, mesh))  # may raise TooManyContacts
     obstacles = BVHObstacles(trees)
-    built = tips.build_tips(found.contacts, params, obstacles)
+    kept = editing.locked_part(read_support_graph(context, support)) if support is not None else None
+    contacts = found.contacts
+    if kept is not None and len(kept):
+        kept_tips = [
+            editing.tip_surface(kept, t, params)[0] for t in np.unique(kept.tip[kept.kind == CONTACT])
+        ]
+        contacts = editing.drop_contacts_near(
+            contacts, np.array(kept_tips).reshape(-1, 3), 0.5 * params.tip_spacing
+        )
+    built = tips.build_tips(contacts, params, obstacles)
     routed = routing.route(built, params, obstacles)
     graph = routed.graph
+    if kept is not None and len(kept):
+        graph.tip = np.where(graph.tip >= 0, graph.tip + editing.next_tip_id(kept), -1)
+        graph = editing.concat(kept, graph)
+        graph.renumber_trees()
 
     if support is None:
         support = _new_support_object(context, objects)
@@ -157,12 +172,8 @@ def generate(context, objects, support=None) -> GenerateResult:
     for ob in objects:
         info.targets.add().obj = ob
     info.set_params(params)
-    info.tip_count = int((graph.kind == CONTACT).sum())
-    info.tree_count = int((graph.kind == FOOT).sum() + (graph.kind == LANDING).sum())
-    info.landing_count = int((graph.kind == LANDING).sum())
-    info.unreachable_count = len(routed.unreachable_tips)
     unreachable = built.surface[routed.unreachable_tips]
-    info.unreachable_json = json.dumps(np.round(unreachable, 4).tolist())
+    _store_stats(info, graph, unreachable)
     info.set_findings(checks.run_checks(graph, params, mesh, obstacles, unreachable, found.support_faces))
     info.seconds = time.perf_counter() - start
     return GenerateResult(
@@ -173,6 +184,76 @@ def generate(context, objects, support=None) -> GenerateResult:
         unreachable_points=built.surface[routed.unreachable_tips],
         seconds=info.seconds,
     )
+
+
+def _store_stats(info, graph, unreachable) -> None:
+    info.tip_count = int((graph.kind == CONTACT).sum())
+    info.tree_count = int((graph.kind == FOOT).sum() + (graph.kind == LANDING).sum())
+    info.landing_count = int((graph.kind == LANDING).sum())
+    info.locked_count = len(np.unique(graph.tree[graph.locked])) if len(graph) else 0
+    info.unreachable_count = len(unreachable)
+    info.unreachable_json = json.dumps(np.round(np.asarray(unreachable).reshape(-1, 3), 4).tolist())
+
+
+class EditSession:
+    """What edits of one support set need, built once: targets, params and the BVHs.
+
+    The Edit Supports tool keeps one for its whole run; standalone operators build one
+    per call.
+    """
+
+    def __init__(self, context, support):
+        info = support.handycactus_set
+        self.support_name = support.name
+        self.objects = info.target_objects()
+        if not self.objects:
+            raise ValueError("This support set's targets no longer exist")
+        self.scale = scene_mm_per_bu(context.scene)
+        self.params = info.params() or settings_to_params(context.scene.handycactus)
+        depsgraph = context.evaluated_depsgraph_get()
+        self.obstacles = BVHObstacles([world_bvh(ob, depsgraph, self.scale) for ob in self.objects])
+
+    def target_index(self, obj) -> int:
+        names = [ob.name for ob in self.objects]
+        return names.index(obj.name) if obj is not None and obj.name in names else -1
+
+
+_active_session: EditSession | None = None
+
+
+def set_active_session(session: EditSession | None) -> None:
+    global _active_session
+    _active_session = session
+
+
+def session_for(context, support) -> EditSession:
+    if _active_session is not None and _active_session.support_name == support.name:
+        return _active_session
+    return EditSession(context, support)
+
+
+def apply_edit(context, support, edit) -> editing.EditResult:
+    """Run `edit(graph, session) -> EditResult` on a support set and store the result.
+
+    On success the graph is written back, stats refreshed and the quick checks re-run
+    (coverage needs a full detection pass; Check Supports runs it).
+    """
+    session = session_for(context, support)
+    graph = read_support_graph(context, support)
+    result = edit(graph, session)
+    if not result.ok:
+        return result
+    info = support.handycactus_set
+    graph_io.write_graph(support.data, result.graph, session.scale)
+    unreachable = info.unreachable_points()
+    contacts = result.graph.pos[result.graph.kind == CONTACT]
+    if len(unreachable) and len(contacts):
+        # A tip added where a contact was unreachable resolves it.
+        near = np.linalg.norm(unreachable[:, None] - contacts[None], axis=2).min(axis=1) < 0.5
+        unreachable = unreachable[~near]
+    _store_stats(info, result.graph, unreachable)
+    info.set_findings(checks.run_checks(result.graph, session.params, None, session.obstacles, unreachable))
+    return result
 
 
 def _testers_from(trees, mesh: MeshData) -> list:

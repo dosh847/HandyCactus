@@ -15,7 +15,7 @@ stuck, and its whole tree is dropped (its tips are reported unreachable).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -40,6 +40,9 @@ DECIMATE_DEGREES = 3.0  # straight-enough runs of branch nodes collapse to one s
 class RoutingResult:
     graph: SupportGraph
     unreachable_tips: np.ndarray  # tip indices that got no support (tips + routing)
+    # With `attach_to`: (node in `graph`, node in attach_to) pairs; the first is a root in
+    # `graph` that continues into the existing graph (see editing.merge_routed).
+    attachments: list[tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -55,7 +58,12 @@ class _Head:
     landing: np.ndarray | None = None  # model surface point this head is heading for
 
 
-def route(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
+def route(
+    tips: Tips, params: Params, obstacles: Obstacles, attach_to: SupportGraph | None = None
+) -> RoutingResult:
+    """Route tips to the bed (or the model). With `attach_to`, heads may also end by joining
+    a reachable unlocked branch or junction of that existing graph (incremental routing,
+    spec 6.5)."""
     b = GraphBuilder()
     r_contact = params.contact_diameter / 2
     r_knuckle = params.knuckle_diameter / 2
@@ -76,11 +84,19 @@ def route(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
     floor = max(params.foot_height, 0.0)
     level = max((h.pos[2] for h in heads), default=floor)
 
+    anchors = _attach_candidates(attach_to)
+    attachments: list[tuple[int, int]] = []
     while heads and level > floor + 1e-9:
         new_level = max(level - params.step_z, floor)
         for h in heads:
             if not h.awake and h.pos[2] > new_level:
                 h.awake = True
+        if anchors is not None:
+            for h in [h for h in heads if h.awake]:
+                target = _attach(h, anchors, attach_to, params, obstacles, tan)
+                if target is not None:
+                    attachments.append((h.node, target))
+                    heads.remove(h)
         awake = [h for h in heads if h.awake]
         targets = _desired_xy(awake, heads, params, obstacles, tan, new_level)
         moved: list[_Head] = []
@@ -120,15 +136,65 @@ def route(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
             b.set_kind(h.node, FOOT)
 
     graph = b.build()
-    graph = _drop_rootless(graph)  # stuck trees
-    graph = _decimate(graph)
+    attached = np.zeros(len(graph), bool)
+    for node, _ in attachments:
+        attached[node] = True
+    keep = _rooted(graph, attached)  # drops stuck trees
+    remap = np.cumsum(keep) - 1
+    attachments = [(int(remap[n]), t) for n, t in attachments if keep[n]]
+    graph = graph.subset(keep)
+    graph = _decimate(graph)  # attached roots have no parent, so they are never removed
+    attachments = _remap_after_decimate(graph, attachments)
     graph.renumber_trees()
     junction = graph.kind == JUNCTION
     graph.sphere[junction] = graph.radius[junction]
 
     supported = np.unique(graph.tip[graph.kind == CONTACT])
     all_tips = np.arange(len(tips))
-    return RoutingResult(graph, np.setdiff1d(all_tips, supported))
+    return RoutingResult(graph, np.setdiff1d(all_tips, supported), attachments)
+
+
+def _attach_candidates(graph: SupportGraph | None) -> np.ndarray | None:
+    """Existing nodes a new branch may join: unlocked branch and junction nodes."""
+    if graph is None or len(graph) == 0:
+        return None
+    ok = np.isin(graph.kind, (BRANCH, JUNCTION)) & ~graph.locked
+    return np.flatnonzero(ok)
+
+
+def _attach(h, anchors, graph, params, obstacles, tan) -> int | None:
+    """An existing node this head can join now: below it, inside its cone, within
+    merge_distance, with a clear line to it. The nearest wins."""
+    if len(anchors) == 0:
+        return None
+    pos = graph.pos[anchors]
+    dz = h.pos[2] - pos[:, 2]
+    d_xy = np.linalg.norm(pos[:, :2] - h.pos[:2], axis=1)
+    dist = np.linalg.norm(pos - h.pos, axis=1)
+    ok = (dz > 1e-6) & (d_xy <= dz * tan + 1e-9) & (dist <= params.merge_distance)
+    for i in np.flatnonzero(ok)[np.argsort(dist[ok])][:4]:
+        direction = (pos[i] - h.pos) / dist[i]
+        hit = obstacles.ray_distance(h.pos[None], direction[None], dist[i])[0]
+        if not np.isfinite(hit):
+            return int(anchors[i])
+    return None
+
+
+def _rooted(graph: SupportGraph, attached: np.ndarray) -> np.ndarray:
+    """Nodes whose root is a foot, a landing, or attaches to an existing graph."""
+    if len(graph) == 0:
+        return np.zeros(0, bool)
+    roots = graph.roots()
+    return np.isin(graph.kind[roots], ROOT_KINDS) | attached[roots]
+
+
+def _remap_after_decimate(graph: SupportGraph, attachments):
+    """Decimation keeps every root, so attached roots are still the roots with no parent;
+    match them back by order."""
+    if not attachments:
+        return attachments
+    roots = np.flatnonzero((graph.parent < 0) & ~np.isin(graph.kind, ROOT_KINDS))
+    return [(int(r), t) for r, (_, t) in zip(roots, sorted(attachments), strict=True)]
 
 
 def _desired_xy(awake, heads, params, obstacles, tan, new_level) -> list[np.ndarray]:
@@ -368,14 +434,6 @@ def _merge_and_extend(b: GraphBuilder, awake, heads, params, obstacles) -> None:
         keep.node, keep.pos, keep.radius = node, p, r
         dead.update(id(awake[i]) for i in idx[1:])
     heads[:] = [h for h in heads if id(h) not in dead]
-
-
-def _drop_rootless(graph: SupportGraph) -> SupportGraph:
-    """Remove every tree whose root is not a foot (stuck branches)."""
-    if len(graph) == 0:
-        return graph
-    roots = graph.roots()
-    return graph.subset(np.isin(graph.kind[roots], ROOT_KINDS))
 
 
 def _decimate(graph: SupportGraph) -> SupportGraph:

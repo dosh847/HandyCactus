@@ -135,6 +135,7 @@ class HC_SupportSet(PropertyGroup):
     tip_count: IntProperty()
     tree_count: IntProperty()
     landing_count: IntProperty()
+    locked_count: IntProperty()
     unreachable_count: IntProperty()
     seconds: FloatProperty()
     unreachable_json: StringProperty(description="Contacts that could not reach the bed (mm)")
