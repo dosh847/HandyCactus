@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    name: Core tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install pytest ruff==0.16.8
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest tests/core
+
+  blender:
+    name: Blender 5.2 tests + extension build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"  # must match the bpy wheel
+          cache: pip
+          cache-dependency-path: .github/workflows/ci.yml
+      - name: Install Blender as a Python module
+        run: pip install bpy==5.2.0 pytest
+      - run: pytest tests
+      - run: python tools/extension.py validate
+      - run: python tools/extension.py build --output-dir dist
+      - run: python tools/extension.py install-check dist/handycactus-*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: handycactus-extension
+          path: dist/*.zip

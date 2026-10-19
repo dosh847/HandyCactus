@@ -1,0 +1,27 @@
+schema_version = "1.0.0"
+
+id = "handycactus"
+version = "0.1.0"
+name = "HandyCactus"
+tagline = "Resin-style tree supports for FDM miniature printing"
+maintainer = "dosh847"
+type = "add-on"
+
+website = "https://github.com/dosh847/HandyCactus"
+
+tags = ["Mesh", "Geometry Nodes", "Import-Export"]
+
+blender_version_min = "5.2.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+# Add `files` permission when 3MF/STL export lands (M5).
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/*.zip",
+]
