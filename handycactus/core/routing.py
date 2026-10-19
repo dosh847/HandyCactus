@@ -273,8 +273,8 @@ def _decimate(graph: SupportGraph) -> SupportGraph:
     cos_limit = np.cos(np.radians(DECIMATE_DEGREES))
     for node in np.flatnonzero((graph.kind == BRANCH) & (children == 1)):
         c, p = child_of[node], parent[node]
-        if p < 0 or c < 0:
-            continue
+        if p < 0 or c < 0 or graph.kind[p] == FOOT:
+            continue  # the node above a foot sets where the flare starts
         a = graph.pos[node] - graph.pos[c]
         bvec = graph.pos[p] - graph.pos[node]
         la, lb = np.linalg.norm(a), np.linalg.norm(bvec)

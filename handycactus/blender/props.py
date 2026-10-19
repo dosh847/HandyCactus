@@ -2,14 +2,25 @@
 """Blender properties, generated from core.params.PARAM_SPECS.
 
 `Scene.handycactus` holds the working settings used for the next Generate.
-From M2 on, Generate copies them onto the supports object it creates, so a
-support set keeps the parameters it was made with (spec section 5.1).
+Generate records them on the supports object it creates
+(`Object.handycactus_set`), together with the target set, so a support set
+remembers what it was made from and with (spec section 5.1).
 """
 
 from __future__ import annotations
 
+import json
+
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty
+from bpy.props import (
+    BoolProperty,
+    CollectionProperty,
+    EnumProperty,
+    FloatProperty,
+    IntProperty,
+    PointerProperty,
+    StringProperty,
+)
 from bpy.types import PropertyGroup
 
 from ..core.params import DEFAULT_PRESET_ID, PARAM_SPECS, PRESETS, PRESETS_BY_ID, Params
@@ -91,11 +102,51 @@ def _build_settings_class():
 HC_Settings = _build_settings_class()
 
 
+def _is_mesh(_self, obj):
+    return obj.type == "MESH"
+
+
+class HC_TargetRef(PropertyGroup):
+    obj: PointerProperty(type=bpy.types.Object, poll=_is_mesh)
+
+
+class HC_SupportSet(PropertyGroup):
+    """Stored on a supports object: what it supports and how it was made."""
+
+    is_support: BoolProperty(default=False)
+    targets: CollectionProperty(type=HC_TargetRef)
+    params_json: StringProperty(description="Parameters used for the last generation (mm)")
+    tip_count: IntProperty()
+    tree_count: IntProperty()
+    unreachable_count: IntProperty()
+    seconds: FloatProperty()
+
+    def target_objects(self) -> list:
+        return [t.obj for t in self.targets if t.obj is not None]
+
+    def set_params(self, params: Params) -> None:
+        self.params_json = json.dumps(params.as_dict())
+
+    def params(self) -> Params | None:
+        return Params().with_values(json.loads(self.params_json)) if self.params_json else None
+
+
+def is_support(obj) -> bool:
+    return obj is not None and obj.handycactus_set.is_support
+
+
+classes = (HC_Settings, HC_TargetRef, HC_SupportSet)
+
+
 def register():
-    bpy.utils.register_class(HC_Settings)
+    for cls in classes:
+        bpy.utils.register_class(cls)
     bpy.types.Scene.handycactus = PointerProperty(type=HC_Settings)
+    bpy.types.Object.handycactus_set = PointerProperty(type=HC_SupportSet)
 
 
 def unregister():
+    del bpy.types.Object.handycactus_set
     del bpy.types.Scene.handycactus
-    bpy.utils.unregister_class(HC_Settings)
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)

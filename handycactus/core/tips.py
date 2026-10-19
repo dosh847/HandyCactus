@@ -89,10 +89,13 @@ def build_tips(contacts: Contacts, params: Params, obstacles: Obstacles) -> Tips
         p, n = surface[i], contacts.normals[i]
         axes = candidate_axes(n, params.max_tip_angle)
         for length_i in lengths:
-            valid = _valid(p, axes, length_i, r_contact, r_knuckle, obstacles)
-            if valid.any():
-                j = int(np.argmax(valid))
-                axis[i], length[i], ok[i] = axes[j], length_i, True
+            # The preferred axis almost always works; only test the cone ring if it doesn't.
+            for chunk in (axes[:1], axes[1:]):
+                valid = _valid(p, chunk, length_i, r_contact, r_knuckle, obstacles)
+                if valid.any():
+                    axis[i], length[i], ok[i] = chunk[int(np.argmax(valid))], length_i, True
+                    break
+            if ok[i]:
                 break
 
     knuckle = surface + axis * length[:, None]

@@ -12,10 +12,12 @@ from .mesh_io import set_size_mm
 from .operators import (
     HANDYCACTUS_OT_apply_preset,
     HANDYCACTUS_OT_clear_preview,
+    HANDYCACTUS_OT_clear_supports,
+    HANDYCACTUS_OT_generate,
     HANDYCACTUS_OT_place_on_bed,
     HANDYCACTUS_OT_preview_contacts,
 )
-from .props import settings_to_params
+from .props import is_support, settings_to_params
 
 # Bigger than any miniature: probably a units mismatch.
 LARGE_MODEL_MM = 500.0
@@ -64,7 +66,19 @@ class HANDYCACTUS_PT_main(_HCPanel, Panel):
         row.operator(HANDYCACTUS_OT_clear_preview.bl_idname, text="", icon="X")
         if overlay.state.preview is not None:
             box.label(text=overlay.contact_summary(overlay.state.preview))
-        layout.label(text="Support generation arrives in M2", icon="INFO")
+        box = layout.box()
+        row = box.row(align=True)
+        row.scale_y = 1.4
+        row.operator(HANDYCACTUS_OT_generate.bl_idname, icon="OUTLINER_OB_POINTCLOUD")
+        box.operator(HANDYCACTUS_OT_clear_supports.bl_idname, icon="TRASH")
+        active = context.active_object
+        if is_support(active):
+            info = active.handycactus_set
+            box.label(text=f"{active.name}", icon="MOD_SKIN")
+            box.label(text=f"{info.tip_count} tips, {info.tree_count} trees ({info.seconds:.2f} s)")
+            if info.unreachable_count:
+                box.label(text=f"{info.unreachable_count} contact(s) unreachable", icon="ERROR")
+            box.label(text="Targets: " + ", ".join(ob.name for ob in info.target_objects()))
 
         for problem in settings_to_params(settings).problems():
             layout.label(text=problem, icon="ERROR")

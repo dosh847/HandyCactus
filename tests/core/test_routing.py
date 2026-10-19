@@ -49,7 +49,8 @@ def test_lifted_box_every_tip_reaches_the_bed():
 
 
 def test_feet_are_flared_and_on_the_bed():
-    _, _, r, _ = generate(voxels([((0, 0, 3), (8, 8, 8))]))
+    # Tall enough for long straight trunks, which decimation must not turn into cones.
+    _, _, r, _ = generate(voxels([((0, 0, 12), (8, 8, 15))]))
     g = r.graph
     feet = np.flatnonzero(g.kind == G.FOOT)
     assert np.allclose(g.pos[feet, 2], 0)

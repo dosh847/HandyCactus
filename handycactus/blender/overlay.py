@@ -28,6 +28,7 @@ POINT_SIZE = 6.0
 SAMPLE_COLOR = (0.2, 0.9, 0.3, 1.0)
 ISLAND_COLOR = (0.1, 0.7, 1.0, 1.0)
 BLOCKED_COLOR = (0.55, 0.55, 0.55, 1.0)
+UNREACHABLE_COLOR = (1.0, 0.1, 0.1, 1.0)
 
 
 @dataclass
@@ -41,6 +42,7 @@ class _State:
     heat_positions: np.ndarray | None = None  # Blender units
     heat_colors: np.ndarray | None = None
     point_positions: np.ndarray | None = None
+    unreachable: np.ndarray | None = None  # (U, 3) mm, from the last Generate
     point_colors: np.ndarray | None = None
     batches: dict = field(default_factory=dict)
     batches_stale: bool = True
@@ -58,6 +60,16 @@ def set_preview(run) -> None:
     state.dirty = state.geometry_dirty = True
     _ensure_running()
     _rebuild()
+
+
+def set_unreachable(points_mm) -> None:
+    """Red markers for contacts the last Generate could not support (None clears)."""
+    state.unreachable = None if points_mm is None else np.asarray(points_mm, dtype=np.float64).reshape(-1, 3)
+    if state.unreachable is not None and len(state.unreachable):
+        _ensure_running()
+    state.dirty = True
+    _rebuild()
+    _stop_if_idle()
 
 
 def clear_preview() -> None:
@@ -102,6 +114,10 @@ def current_set(context=None) -> list:
     return mesh_targets(view_layer.objects.selected)
 
 
+def _has_points() -> bool:
+    return state.preview is not None or (state.unreachable is not None and len(state.unreachable) > 0)
+
+
 def _enabled(scene) -> bool:
     return scene is not None and scene.handycactus.show_heatmap
 
@@ -127,12 +143,23 @@ def _rebuild() -> None:
     scale = scene_mm_per_bu(scene)
 
     preview = state.preview
+    positions, colors = [], []
     if preview is not None:
         c = preview.result.contacts
         blocked = preview.result.blocked_islands
-        state.point_positions = np.concatenate([c.positions, blocked]) / scale
-        colors = np.where(c.is_island[:, None], ISLAND_COLOR, SAMPLE_COLOR)
-        state.point_colors = np.concatenate([colors, np.tile(BLOCKED_COLOR, (len(blocked), 1))])
+        positions += [c.positions, blocked]
+        colors += [
+            np.where(c.is_island[:, None], ISLAND_COLOR, SAMPLE_COLOR),
+            np.tile(BLOCKED_COLOR, (len(blocked), 1)),
+        ]
+    if state.unreachable is not None and len(state.unreachable):
+        positions.append(state.unreachable)
+        colors.append(np.tile(UNREACHABLE_COLOR, (len(state.unreachable), 1)))
+    if positions:
+        state.point_positions = np.concatenate(positions) / scale
+        state.point_colors = np.concatenate(colors)
+    else:
+        state.point_positions = state.point_colors = None
 
     if _enabled(scene) and objects:
         # Geometry is re-read only when the set or the scale changed or an object was edited;
@@ -158,7 +185,7 @@ def _rebuild() -> None:
 
 def _tick():
     scene = bpy.context.scene
-    if not (_enabled(scene) or state.preview is not None):
+    if not (_enabled(scene) or _has_points()):
         state.timer_running = False
         _stop_if_idle(from_timer=True)
         return None  # returning None unregisters this timer
@@ -206,7 +233,7 @@ def _ensure_running() -> None:
 
 def _stop_if_idle(from_timer: bool = False) -> None:
     scene = bpy.context.scene
-    if _enabled(scene) or state.preview is not None:
+    if _enabled(scene) or _has_points():
         return
     if state.draw_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(state.draw_handle, "WINDOW")

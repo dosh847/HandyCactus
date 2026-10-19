@@ -75,3 +75,46 @@ class BVHInsideTester:
             crossings += 1
             o = hit + direction * _STEP
         return crossings % 2 == 1
+
+
+def world_bvh(obj, depsgraph, scale_mm: float) -> BVHTree:
+    """BVH of the evaluated object in world space, millimetres (built in C via bmesh)."""
+    import bmesh
+
+    bm = bmesh.new()
+    try:
+        bm.from_object(obj, depsgraph)
+        bmesh.ops.transform(bm, matrix=Matrix.Scale(scale_mm, 4) @ obj.matrix_world, verts=bm.verts)
+        return BVHTree.FromBMesh(bm)
+    finally:
+        bm.free()
+
+
+class BVHObstacles:
+    """core.spatial.Obstacles over several world-space BVHs (one per target)."""
+
+    def __init__(self, trees: list[BVHTree]):
+        self.trees = trees
+
+    def nearest_distance(self, points: np.ndarray) -> np.ndarray:
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        out = np.full(len(points), np.inf)
+        for i, p in enumerate(points.tolist()):
+            v = Vector(p)
+            for tree in self.trees:
+                hit = tree.find_nearest(v)
+                if hit[0] is not None and hit[3] < out[i]:
+                    out[i] = hit[3]
+        return out
+
+    def ray_distance(self, origins: np.ndarray, directions: np.ndarray, max_distance: float) -> np.ndarray:
+        origins = np.asarray(origins, dtype=np.float64).reshape(-1, 3)
+        directions = np.asarray(directions, dtype=np.float64).reshape(-1, 3)
+        out = np.full(len(origins), np.inf)
+        for i, (o, d) in enumerate(zip(origins.tolist(), directions.tolist(), strict=True)):
+            vo, vd = Vector(o), Vector(d)
+            for tree in self.trees:
+                hit = tree.ray_cast(vo, vd, max_distance)
+                if hit[0] is not None and hit[3] < out[i]:
+                    out[i] = hit[3]
+        return out

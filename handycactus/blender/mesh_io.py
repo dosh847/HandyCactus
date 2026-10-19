@@ -80,5 +80,9 @@ def _group_weights(obj_eval, mesh, name: str) -> np.ndarray | None:
 
 
 def mesh_targets(objects) -> list:
-    """Mesh objects from a selection, in a stable (name) order."""
-    return sorted((ob for ob in objects if ob.type == "MESH"), key=lambda ob: ob.name)
+    """Mesh objects from a selection (supports objects excluded), in a stable (name) order."""
+    return sorted(
+        # The selection can briefly hold None right after objects are deleted.
+        (ob for ob in objects if ob is not None and ob.type == "MESH" and not ob.handycactus_set.is_support),
+        key=lambda ob: ob.name,
+    )

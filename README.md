@@ -13,21 +13,28 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Status
 
-**M1: detection and heatmap.** The **HandyCactus** tab in the 3D viewport
-sidebar (N panel) has presets and every parameter, plus:
+**M2: support generation.** The **HandyCactus** tab in the 3D viewport
+sidebar (N panel) has presets, every parameter and a **Units** setting
+(default: 1 Blender unit = 1 mm, which is how STLs import). Also in the tab:
 
 - **Place on Bed**: moves the selected meshes together so their lowest point
   sits at the lift height.
 - **Overhang Heatmap**: colours the faces of the selected meshes that need
   support (yellow to red). Also available in the viewport Overlays popover.
-- **Preview Contacts**: shows where support tips would touch the model.
-  Green dots are samples and blue dots are islands. Magenta faces on the
-  heatmap are coverage gaps.
+- **Preview Contacts**: shows where tips will touch the model (green
+  samples, blue islands, magenta uncovered faces on the heatmap).
+- **Generate Supports**: builds tree supports for the selected meshes, as
+  one `<name>_HC_Supports` object driven by Geometry Nodes. It is made of
+  tips, knuckle balls, branches merging into trunks, and flared feet. Run
+  it again to rebuild the set in place. Red dots mark contacts that could
+  not reach the bed.
+- **Clear Supports**: deletes the selected support sets.
 
 Paint a vertex group named `HC_Force` to force supports on an area, or
 `HC_Block` to keep them off it.
 
-Support generation arrives in M2; see the milestones in the spec.
+Next: printability checks (M3), then manual editing (M4) and 3MF/STL export
+(M5).
 
 ## Layout
 
@@ -62,7 +69,7 @@ pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.2.0.zip
+python tools/extension.py install-check dist/handycactus-0.3.0.zip
 ```
 
 ### Installing for development

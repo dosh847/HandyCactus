@@ -109,7 +109,12 @@ The supports object stores:
 - all generation parameters.
 
 Settings therefore stay with the file and travel with duplication. To create
-a set, select the targets and press **Generate**. A set can be edited later
+a set, select the targets and press **Generate**. As built in M2:
+- the parameters are recorded as JSON (`params_json`);
+- Generate on the same targets rebuilds their existing set in place, so
+  there are never duplicate sets;
+- Generate with only a supports object selected rebuilds it from its
+  recorded targets. A set can be edited later
 (add or remove a target). Removing a target deletes the tips that touch it.
 **Regenerate** keeps any locked tree, even if some of its tips are on a
 removed target; those tips are flagged in checks.
@@ -119,12 +124,13 @@ removed target; those tips are flagged in checks.
 | Attribute | Type | Meaning |
 |---|---|---|
 | `hc_kind` | INT | 0 contact, 1 knuckle, 2 branch, 3 junction, 4 foot |
-| `hc_radius` | FLOAT | Radius in mm at this node |
+| `hc_radius` | FLOAT | Tube radius at this node (stored in Blender units, so the GN build needs no unit handling) |
 | `hc_parent` | INT | Index of the next node toward the bed (-1 for a foot) |
 | `hc_tree` | INT | Tree id |
 | `hc_tip` | INT | Tip id (contact and knuckle nodes; -1 otherwise) |
 | `hc_target` | INT | Index into the target set of the object a contact touches (-1 for non-contact nodes) |
 | `hc_dir` | FLOAT_VECTOR | Tip axis, unit vector from contact to knuckle |
+| `hc_sphere` | FLOAT | Ball radius drawn at the node (knuckles, junctions); 0 = none |
 | `hc_locked` | BOOL | Node belongs to a locked tree |
 | `hc_flags` | INT | Bitfield: manual, override, check-failed, unreachable |
 
@@ -139,16 +145,20 @@ asserts it.
 
 ### 5.3 Geometry Nodes build (`HC_SupportGeometry`)
 
-1. **Segments**: Mesh to Curve on graph edges excluding contact→knuckle,
-   then Set Curve Radius from `hc_radius`, then Curve to Mesh with a circle
-   profile (`profile_resolution`, default 12).
-2. **Tips**: the contact→knuckle edges build the same way, but the radius at
-   the contact end is `contact_diameter / 2`. Contact nodes are offset
-   `penetration` into the model along `-hc_dir`.
-3. **Knuckles and junctions**: Instance on Points (UV sphere, scaled by
-   `hc_radius × knuckle_scale`), then Realize Instances.
-4. **Feet**: a flared cone from foot radius to `foot_radius` over
-   `foot_height`. Feet are always generated, for bed adhesion.
+1. **Segments**: Mesh to Curve on all graph edges, then Curve to Mesh with
+   a unit circle profile (`profile_resolution`, default 12) and capped ends.
+   Its `Scale` input is fed `hc_radius`; Blender 5.x scales the profile by
+   this input rather than by the curve radius.
+2. **Tips** need no special case. The contact node's `hc_radius` is
+   `contact_diameter / 2`, so the contact→knuckle tube is a cone. Contact
+   nodes sit `penetration` inside the model along `-hc_dir`.
+3. **Knuckles and junctions**: Instance on Points (a UV sphere scaled by
+   `hc_sphere`, on points where it is > 0), then Realize Instances.
+4. **Feet**: the trunk's last node sits at `foot_height` straight above the
+   foot. The foot node at z = 0 has `hc_radius = foot_radius`, so the last
+   tube flares into a cone. Straight-run decimation never removes that
+   node, or the whole trunk would become one tall cone (this happened in
+   M2 testing). Feet are always generated, for bed adhesion.
 5. **Output**: overlapping closed shells. Slicers union overlapping shells
    within one part, so this is enough for slicing. A **Bake watertight**
    option (Mesh to Volume → Volume to Mesh, voxel size
@@ -156,7 +166,10 @@ asserts it.
    default because it is slow.
 
 All GN inputs that are purely visual (profile resolution, sphere segments)
-are exposed on the modifier, so they update live with no regeneration.
+are exposed on the modifier, so they update live with no regeneration. In
+Blender 5.x these inputs are set through
+`mod.properties.inputs.<socket identifier>.value`; they are no longer ID
+properties on the modifier.
 
 ## 6. Generation pipeline
 
@@ -169,12 +182,17 @@ Locked trees are loaded first and are never changed by the pipeline.
   numpy arrays: vertex positions (mm, world space), triangles (from loop
   triangles), face normals, face areas, vertex adjacency, and a per-face
   `target_index`.
-- Build one BVH over the combined mesh, so every target is an obstacle for
-  every other target's tips and branches (needed from M2). The inside test
-  below uses one BVH per target, built in C with `BVHTree.FromObject` in
-  object space. Query points are mapped into object space, which gives the
-  same inside/outside answer. A target's BVH is built only when its bounds
-  overlap another target's, because otherwise it is never queried.
+- **Generate** builds one world-space BVH in mm per target, in C:
+  `bmesh.from_object`, then `bmesh.ops.transform`, then
+  `BVHTree.FromBMesh`. This takes about 0.8 s for 500k triangles, against
+  about 2 s from Python lists. The same trees serve the inside test and the
+  obstacle queries (`Obstacles` protocol: nearest distance and first ray
+  hit, taking the minimum over targets), so every target is an obstacle for
+  every other target's tips and branches.
+- **Preview Contacts** needs only the inside test. It builds an object-space
+  BVH (`BVHTree.FromObject`) only for targets whose bounds overlap
+  another's, and maps query points into object space (inside/outside is
+  unchanged by an affine map).
 - **Overlapping parts**: multi-part minis often intersect (an arm pushed into
   the body). Any face, sample or contact that lies **inside another target**
   is discarded, because it will never print as a surface. "Inside" is decided
@@ -240,14 +258,21 @@ For each contact `p` with surface normal `n`:
   `max_tip_angle` (default 45°) of `-Z`.
 - The knuckle position is `k = p + d × tip_length` (default 1.5 mm).
 - **Clearance**: cast a ray from `k` toward `p`. It must hit within
-  `0.05 mm` of `p`. The tip cone's side samples must also stay at least
-  `model_clearance` from the model, except within the last 0.5 mm.
-  - If that fails, retry `d` at 8 azimuths × 3 tilts inside the clamp cone.
+  `0.05 mm` of `p`. Four samples along the axis, from 0.5 mm out to the
+  knuckle, must each stay at least `cone radius + 0.1 mm` from the model.
+  The knuckle check uses its ball radius. `model_clearance` (0.8 mm) is for
+  branches; on a 1.5 mm tip it would reject almost every contact on a
+  curved surface. The knuckle must also be above the bed.
+  - If that fails, retry `d` at 8 azimuths × 3 tilts inside the clamp cone,
+    plus straight down, ordered by closeness to `n`. The ring is only
+    evaluated when the preferred axis fails, which keeps tips at about
+    0.3 s for 400 contacts.
   - If those fail, shorten the tip down to `min_tip_length`.
   - If that fails, mark the contact *unreachable* (reported by checks, not
     built).
-- The knuckle must not overlap another knuckle. When two do, offset the
-  lower one along its axis.
+- The knuckle must not overlap another knuckle. When two do, the lower tip
+  is lengthened along its own axis by exactly the amount that gives
+  `2 × knuckle radius + 0.01 mm` between them (solved, not estimated).
 
 ### 6.4 Branch routing: greedy cone merging
 The approach follows Meshmixer and PrusaSlicer organic supports.
@@ -289,6 +314,34 @@ active node:
 Ordering and determinism: process nodes sorted by `(z desc, x, y)` with
 seeded RNG for Poisson sampling. The same input and parameters always give
 the same output.
+
+**As built in M2** (`core/routing.py`):
+- **Level sweep.** A level falls from the highest knuckle in `step_z` steps
+  (default 0.4 mm) to `foot_height`. A head wakes when the level passes it,
+  and every awake head then moves down to the level, so heads meet at equal
+  heights.
+- **Where a head goes.** A head moves toward the nearest head within
+  `merge_distance` that is at or below its own height. If that head is also
+  awake, both aim for the midpoint. With no partner, the head goes straight
+  down, unless a downward ray hits the model within 30 mm. Then it heads
+  for whichever of 16 cone-rim directions runs free the longest.
+- **Clearance.** A move is accepted if it keeps `radius + model_clearance`
+  from the model, or at least does not get closer than before (knuckles
+  start nearer than that). Otherwise the best of 33 cone candidates is
+  used: the rim, the half-rim and straight down. With no candidate, the
+  head is stuck.
+- **Merging.** Heads within `max(r) + 0.3 mm` merge, but only when every
+  member can reach the junction from its previous node inside its cone, so
+  no branch ever exceeds `max_branch_angle`. Heads that aren't there yet
+  merge on a later level. The junction sits at the area-weighted mean
+  position.
+- **Stuck heads.** Simplification: a stuck head drops its **whole tree**
+  rather than only back to its last junction, and all the tips it carried
+  are reported unreachable. They are drawn as red markers, and the panel
+  shows the count.
+- **Decimation.** After routing, runs of single-child branch nodes that
+  turn less than 3° collapse into one segment (except the node above a
+  foot).
 
 ### 6.5 Incremental routing
 These operations use the same routine on a subset:
@@ -502,6 +555,15 @@ Reference machine: a 2023 mid-range laptop CPU.
 | Tips + routing, 1,000 tips | < 4 s |
 | Incremental add-tip | < 150 ms |
 | Generate end to end, typical 42 mm mini (~500k tris over 1–5 parts, ~600 tips) | < 4 s |
+
+**Measured at M2**: Generate on a three-part set (500k-triangle body, an arm
+sphere and a box), about 420 tips and 113 trees:
+- cold: 3.6–4.9 s;
+- warm: 3.2 s, of which detect 1.3 s, routing 0.64 s, BVH builds 0.55 s,
+  mesh read 0.3 s and tips 0.26 s.
+
+That is at the < 4 s target, with noisy timings in this container. Most of
+the remaining time is per-query Python overhead in the BVH adapter.
 
 **Measured at M1** (Blender 5.2 `bpy` in the CI container, best of 3,
 500k-triangle sphere plus an overlapping 8k-triangle part):
