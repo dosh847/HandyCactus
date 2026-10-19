@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "handycactus"
-version = "0.4.0"
+version = "0.5.0"
 name = "HandyCactus"
 tagline = "Resin-style tree supports for FDM miniature printing"
 maintainer = "dosh847"

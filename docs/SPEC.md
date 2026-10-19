@@ -1,6 +1,6 @@
-# HandyCactus — Tree Supports for FDM in Blender (Spec v0.2)
+# HandyCactus — Tree Supports for FDM in Blender (Spec v0.3)
 
-> Status: v0.2. The interview's open questions are resolved (2026-10-19).
+> Status: v0.3. Adds landing on the model and manual editing as built in M4 (2026-10-19).
 
 HandyCactus is a Blender extension that generates **resin-style tree supports
 for FDM printing**: thin, tapered tips that touch the model at points and snap
@@ -36,7 +36,8 @@ and PandaProps (github.com/PandaProps/releases).
 | Export (v1) | 3MF (model and supports as parts of one object) and STL |
 | Units | Always millimetres, converted using the scene unit scale |
 | License | GPL-3.0-or-later, distributed on extensions.blender.org |
-| Deferred to v2+ | Bambu/Orca layer check, auto-orientation, landing on the model, rafts, cross-bracing |
+| Landing | Build plate first; a branch with no way to the bed may land on an upward-facing part of the model (pulled into v1 in M4) |
+| Deferred to v2+ | Bambu/Orca layer check, auto-orientation, rafts, cross-bracing |
 
 ## 2. Goals and non-goals
 
@@ -334,10 +335,10 @@ active node:
 4. **Taper**: the radius grows by `taper_rate` mm per mm of descent
    (default 0.03), clamped to `[min_radius, max_radius]`. Defaults are
    0.2–2.0 mm radius.
-5. **Landing**: a node that reaches `z ≤ 0` becomes a foot.
-6. **Stuck nodes**: since there is no landing on the model in v1, a stuck
-   branch is removed back to its last junction. Its tips are marked
-   *unreachable* and reported.
+5. **Landing**: a node that reaches `z ≤ 0` becomes a foot. A node with no
+   way to the bed may instead land on the model (§6.4.1).
+6. **Stuck nodes**: a branch that can neither reach the bed nor land is
+   removed. Its tips are marked *unreachable* and reported.
 
 Ordering and determinism: process nodes sorted by `(z desc, x, y)` with
 seeded RNG for Poisson sampling. The same input and parameters always give
@@ -379,14 +380,39 @@ the same output.
   turn less than 3° collapse into one segment (except the node above a
   foot).
 
-### 6.5 Incremental routing
-These operations use the same routine on a subset:
-- Adding a manual tip.
-- Re-routing one tree after its tip moved.
+### 6.4.1 Landing on the model (M4)
+Setting `land_on_model` (default on). The bed is always preferred: a head
+only lands when it has no free path to the bed.
+- **Where.** A *blocked* head with no escape path looks for a landing spot:
+  the most vertical ray in its cone that hits a model surface facing up
+  (normal z ≥ 0.3, `LANDING_MIN_UP`). It then steers toward that spot as it
+  descends.
+- **When.** The head lands once the spot is within `2 × tip_length`
+  (`LANDING_REACH`), inside its cone, and in clear sight. A head that gets
+  stuck also tries a landing within that reach before giving up.
+- **Shape.** The landing is a small tip: a break ball of `knuckle_diameter`
+  on the branch end, then a cone tapering to `contact_diameter`, pushed
+  `penetration` into the surface. Its node kind is `LANDING` (5). Like a
+  foot, it is a tree root.
+- **Reporting.** Landings leave a small mark, so each one is listed as an
+  INFO finding (not counted as an error or warning), and the panel shows how
+  many trees land on the model.
 
-Here, existing **unlocked** trees are valid merge targets. When a branch
-merges in, radii downstream of the merge point are recomputed (taper and
-merge rule). Locked trees stay obstacles only.
+Measured on the three synthetic organic minis (layered shells, 276–449
+tips): 5, 8 and 14 unreachable tips (1–5%), with 16, 1 and 0 landings.
+Generation takes 1.5–1.9 s.
+
+### 6.5 Incremental routing
+`route(..., attach_to=graph)` is used for:
+- adding a manual tip;
+- moving a tip (delete, then add at the new spot);
+- rebuilding a tip with overrides.
+
+A head may end by joining an existing **unlocked** branch or junction node:
+below it, inside its cone, within `merge_distance`, with a clear line to it.
+The radii from the join down to the root grow area-conserving
+(`sqrt(r² + r_new²)`, capped at `max_radius`). Locked trees are obstacles
+only. Otherwise the head routes to the bed or lands, as in §6.4.
 
 ### 6.6 Write-back
 Write nodes and attributes into the supports mesh in one `foreach_set` pass.
@@ -395,7 +421,7 @@ operator is a single undo step.
 
 ## 7. Manual editing
 
-**Edit Supports** is a modal operator, with a workspace tool wrapper.
+**Edit Supports** is a modal operator, started from the panel.
 
 | Input | Action |
 |---|---|
@@ -404,6 +430,7 @@ operator is a single undo step.
 | LMB drag on a contact | Slide the contact along the surface (continuous raycast). The tip rebuilds live; on release the tree re-routes |
 | LMB drag on a junction or branch node | Move the node in the view plane (X/Y/Z constraint keys like `G`). Child and parent segments are re-checked for clearance and angle, and turn red if they violate it |
 | L | Toggle lock on the hovered tree |
+| T | Tip settings (per-tip overrides) for the hovered tip |
 | Esc / RMB | Exit |
 
 - Any manual edit to a tree sets the `manual` flag and **locks** the tree
@@ -420,6 +447,35 @@ operator is a single undo step.
 
 **Clear Unlocked** and **Clear All** are separate operators. Clear All asks
 for confirmation.
+
+**As built in M4** (`core/editing.py`, `core/picking.py`,
+`blender/edit_tool.py`):
+- The tool works on the support set of the active object (the supports, or
+  one of their targets). Hovered nodes are highlighted, and a dragged node
+  shows where it will go.
+- **Add**: LMB on the model away from any node adds a tip there, routed
+  incrementally (§6.5). With no room for a tip, or no way down, nothing is
+  added and a warning says why.
+- **Drag a tip**: on release, the tip moves to the surface point under the
+  mouse and re-routes. The live tip rebuild while dragging is not built.
+- **Drag a node**: on release, the node moves in the view plane at its own
+  depth, and must stay above the bed. Axis constraints and red violation
+  segments are not built; **Check Supports** reports a steep or colliding
+  result.
+- **Tip settings** (T over a tip): a dialog with contact diameter, tip
+  length, penetration, knuckle diameter and maximum tip angle. It opens with
+  the set's global values, so confirming it unchanged resets the tip. The
+  tip is rebuilt with those values and flagged `override`. Showing a tip's
+  current overrides in the N-panel is not built.
+- Every edit locks the tree it touches and is one undo step. Auto-lock is
+  always on (no preference yet).
+- **Lock All** / **Unlock All** in the panel, with the locked count.
+- After each edit, the checks run again without the coverage check, which
+  needs detection. **Check Supports** runs the full set.
+- **Regenerate** (Generate on an existing set) keeps locked trees as built
+  above; their tip ids are kept, and new tips are numbered after them.
+- **Clear Unlocked** is not built yet. **Clear Supports** deletes the whole
+  set.
 
 ## 8. Overhang heatmap overlay
 
@@ -678,13 +734,20 @@ None. All six were resolved on 2026-10-19:
 
 New questions found during implementation go here:
 
-7. **Contacts in sub-1 mm crevices** (M3, open). On layered sculpts
+7. **Contacts in sub-1 mm crevices** (M3; addressed in M4). On layered sculpts
    (feathers, scales, cloth folds), some contacts sit in gaps too narrow
    for any branch to leave: under 1 mm between two parts of the model.
    With build-plate-only routing they stay unreachable. That was about 11%
    of contacts on the organic test model, reported as errors with markers.
    Supporting them needs **landing on the model** (currently v2), or
    accepting them as unsupported and fixing by hand (M4).
+   *Resolution (M4):* both. Landing on the model (§6.4.1) was pulled into
+   v1, and contacts on buried surfaces (where shells overlap) are no longer
+   generated: a surface point is skipped when the point 0.02 mm outside it
+   is still inside a target. The inside test is now a ray winding number
+   (exits minus entries, majority of 3 rays), which is correct for
+   overlapping shells where crossing parity is not. The rest are fixed by
+   hand with the Edit Supports tool.
 
 ## 15. Milestones
 
@@ -701,7 +764,6 @@ New questions found during implementation go here:
 **v2 backlog**:
 - Bambu/Orca headless layer check (slicer CLI + parsed warnings).
 - Auto-orientation.
-- Landing on the model.
 - Rafts and pads.
 - Cross-bracing (unless pulled into v1).
 - Resin profile.

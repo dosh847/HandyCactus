@@ -13,7 +13,7 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Status
 
-**M3: printability checks.** The **HandyCactus** tab in the 3D viewport
+**M4: manual editing and landing on the model.** The **HandyCactus** tab in the 3D viewport
 sidebar (N panel) has presets, every parameter and a **Units** setting
 (default: 1 Blender unit = 1 mm, which is how STLs import). Also in the tab:
 
@@ -34,11 +34,19 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
   branches hitting the model, slender trunks and tiny feet. Findings are
   listed in the panel and marked in the viewport (red errors, orange
   warnings). **Frame Finding** jumps to one.
+- **Land on Model** (Branches settings, on by default): a branch that
+  cannot reach the bed lands on an upward-facing part of the model with a
+  small breakaway tip. Landings are listed as info findings.
+- **Edit Supports**: click the model to add a tip, Ctrl+click a tip to
+  delete it, drag a tip along the model or drag a branch node, **L** locks
+  or unlocks the hovered tree, **T** opens per-tip settings, Esc or right
+  click exits. Every edit is one undo step and locks its tree.
+- **Lock All / Unlock All**: locked trees are kept when you Generate again.
 
 Paint a vertex group named `HC_Force` to force supports on an area, or
 `HC_Block` to keep them off it.
 
-Next: manual editing (M4), then 3MF/STL export (M5).
+Next: 3MF/STL export (M5).
 
 ## Layout
 
@@ -73,7 +81,7 @@ pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.4.0.zip
+python tools/extension.py install-check dist/handycactus-0.5.0.zip
 ```
 
 ### Installing for development
