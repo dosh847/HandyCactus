@@ -56,6 +56,7 @@ def test_read_target_world_space_mm_with_modifiers(scene):
 
 
 def test_read_target_respects_scene_scale(scene):
+    scene.handycactus.units = "SCENE"
     scene.unit_settings.scale_length = 1.0  # metres: 1 BU = 1000 mm
     ob = add_box(0.01, (0, 0, 0.008), "box", subdivide=0)
     t = evaluated_target(ob)
@@ -155,7 +156,7 @@ def test_heatmap_toggle_builds_and_clears_overlay_data(scene):
     scene.handycactus.show_heatmap = True
     assert overlay.state.face_count > 0
     assert overlay.state.draw_handle is not None
-    assert overlay.state.heat_positions[:, 2].max() < 3.0  # drawn just below the underside
+    assert overlay.state.heat_positions[:, 2].max() == pytest.approx(3.0, abs=1e-4)  # on the underside
     scene.handycactus.show_heatmap = False
     assert overlay.state.face_count == 0
     assert overlay.state.draw_handle is None
@@ -173,3 +174,21 @@ def test_timer_tick_rebuilds_on_parameter_change_and_stops_when_idle(scene):
     scene.handycactus.show_heatmap = False
     assert overlay._tick() is None  # idle: the timer stops itself without error
     assert overlay.state.draw_handle is None
+
+
+def test_default_units_are_one_unit_per_mm(scene):
+    scene.unit_settings.scale_length = 1.0  # a default metre scene
+    assert scene.handycactus.units == "MM"
+    ob = add_box(10, (0, 0, 8), "box", subdivide=0)
+    t = evaluated_target(ob)
+    assert t.verts[:, 2].min() == pytest.approx(3.0)
+    assert mesh_io.set_size_mm([ob], scene) == pytest.approx((10, 10, 10))
+
+
+def test_preview_refuses_a_model_that_is_not_in_mm(scene):
+    scene.handycactus.units = "SCENE"
+    scene.unit_settings.scale_length = 1.0  # 1 unit = 1 m: a 10-unit box is 10 m
+    ob = add_box(10, (0, 0, 8), "box")
+    select_only(ob)
+    with pytest.raises(RuntimeError, match="Units"):
+        bpy.ops.handycactus.preview_contacts()

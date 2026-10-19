@@ -15,9 +15,9 @@ def test_only_overhang_faces_are_drawn():
     assert h.face_count == bottom
     assert h.positions.shape == (3 * bottom, 3)
     assert h.colors.shape == (3 * bottom, 4)
-    # Horizontal ceiling is the red end of the ramp, offset just below the surface.
+    # Horizontal ceiling is the red end of the ramp, drawn on the surface.
     assert np.allclose(h.colors, heatmap.HIGH)
-    assert np.allclose(h.positions[:, 2], 3 - heatmap.OFFSET_MM)
+    assert np.allclose(h.positions[:, 2], 3)
 
 
 def test_ramp_runs_from_yellow_to_red():

@@ -6,6 +6,7 @@ from __future__ import annotations
 import bpy
 from bpy.types import Operator
 
+from ..core.detection import TooManyContacts
 from . import overlay, pipeline
 from .mesh_io import BLOCK_GROUP, mesh_targets
 from .props import apply_preset, settings_to_params
@@ -48,7 +49,11 @@ class HANDYCACTUS_OT_preview_contacts(_NeedsMeshSelection, Operator):
             self.report({"ERROR"}, f"Selection is {-lowest:.2f} mm below the bed; use Place on Bed first")
             return {"CANCELLED"}
 
-        run = pipeline.run_detection(context, objects)
+        try:
+            run = pipeline.run_detection(context, objects)
+        except TooManyContacts as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
         overlay.set_preview(run)
         for warning in run.result.warnings:
             self.report({"WARNING"}, warning)

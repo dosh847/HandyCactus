@@ -73,9 +73,16 @@ and PandaProps (github.com/PandaProps/releases).
 ## 4. Coordinate and unit conventions
 
 - The build plate is the world XY plane at Z = 0, with +Z up.
-- All parameters are in mm. Internally,
-  `mm_to_bu = 1 / (scene.unit_settings.scale_length * 1000)` converts to
-  Blender units.
+- All parameters are in mm. A **Units** setting says how Blender units map
+  to millimetres:
+  - **1 Unit = 1 mm** (the default) treats one Blender unit as 1 mm,
+    whatever the scene's unit settings are. This is how STL files land in a
+    default Blender scene, so a 42 mm mini is 42 units tall.
+  - **Scene Units** follows the scene's Unit Scale:
+    `mm_per_bu = scale_length × 1000`.
+- The panel shows the selected set's size in mm and warns above 500 mm. If
+  detection would need more than 20,000 contacts, it stops and points at the
+  Units setting, because a model that size is almost always a units mismatch.
 - Targets are read **evaluated** (with modifiers applied) and **in world
   space**. A target below Z < 0 is an error that offers "Place on bed".
 - **Place on bed with lift** (helper operator): moves the whole target set

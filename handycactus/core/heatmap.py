@@ -21,7 +21,6 @@ from .params import Params
 LOW = np.array([1.0, 0.85, 0.1, 0.55])
 HIGH = np.array([0.9, 0.1, 0.05, 0.65])
 GAP = np.array([1.0, 0.0, 0.85, 0.8])
-OFFSET_MM = 0.02  # lift the overlay off the surface to avoid z-fighting
 
 
 @dataclass
@@ -46,8 +45,8 @@ def build(mesh: MeshData, params: Params, contacts: np.ndarray | None = None) ->
         colors[gap] = GAP
         gaps = int(gap.sum())
 
-    offset = mesh.face_normals[faces] * OFFSET_MM
-    corners = mesh.verts[mesh.tris[faces]] + offset[:, None, :]  # (F, 3, 3)
+    # Drawn exactly on the surface; the overlay shader biases depth (no z-fighting).
+    corners = mesh.verts[mesh.tris[faces]]  # (F, 3, 3)
     return Heatmap(
         positions=corners.reshape(-1, 3),
         colors=np.repeat(colors, 3, axis=0),

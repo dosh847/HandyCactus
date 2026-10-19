@@ -20,6 +20,10 @@ from .pipeline import read_set
 from .props import settings_to_params
 
 TICK_SECONDS = 0.25
+# The heatmap lies exactly on the surface; pull it toward the camera by this
+# fraction of its view distance so it wins the depth test at any model scale
+# and zoom without showing through nearby geometry.
+DEPTH_PULL = 1e-3
 POINT_SIZE = 6.0
 SAMPLE_COLOR = (0.2, 0.9, 0.3, 1.0)
 ISLAND_COLOR = (0.1, 0.7, 1.0, 1.0)
@@ -65,6 +69,17 @@ def clear_preview() -> None:
     _stop_if_idle()
 
 
+def invalidate() -> None:
+    """Units changed: cached geometry and any preview are stale."""
+    state.preview = None
+    state.point_positions = state.point_colors = None
+    state.mesh = None
+    state.dirty = state.geometry_dirty = True
+    state.batches_stale = True
+    if state.timer_running:
+        _rebuild()
+
+
 def sync(scene) -> None:
     """Start or stop the overlay to match the scene's toggle."""
     if scene.handycactus.show_heatmap:
@@ -98,7 +113,7 @@ def _signature(scene, objects) -> tuple:
         p.overhang_angle,
         p.bed_ignore_height,
         p.tip_spacing,
-        scene.unit_settings.scale_length,
+        scene_mm_per_bu(scene),
     )
 
 
@@ -122,7 +137,7 @@ def _rebuild() -> None:
     if _enabled(scene) and objects:
         # Geometry is re-read only when the set or the scale changed or an object was edited;
         # parameter changes reuse the cached mesh.
-        mesh_key = (state.signature[0], scene.unit_settings.scale_length)
+        mesh_key = (state.signature[0], scale)
         if state.mesh is None or state.mesh_key != mesh_key or geometry_dirty:
             state.mesh = read_set(context, objects)
             state.mesh_key = mesh_key
@@ -212,13 +227,49 @@ def _tag_redraw() -> None:
                 area.tag_redraw()
 
 
+_heat_shader = None
+
+
+def _get_heat_shader():
+    """FLAT_COLOR with a view-relative depth pull (see DEPTH_PULL)."""
+    global _heat_shader
+    if _heat_shader is None:
+        import gpu
+
+        info = gpu.types.GPUShaderCreateInfo()
+        info.push_constant("MAT4", "modelViewMatrix")
+        info.push_constant("MAT4", "projectionMatrix")
+        info.push_constant("FLOAT", "depthPull")
+        info.push_constant("FLOAT", "isPerspective")
+        info.vertex_in(0, "VEC3", "pos")
+        info.vertex_in(1, "VEC4", "color")
+        iface = gpu.types.GPUStageInterfaceInfo("hc_heat_iface")
+        iface.flat("VEC4", "finalColor")
+        info.vertex_out(iface)
+        info.fragment_out(0, "VEC4", "fragColor")
+        info.vertex_source(
+            "void main() {"
+            "  vec4 p = modelViewMatrix * vec4(pos, 1.0);"
+            # Perspective: slide along the eye ray (screen position unchanged).
+            # Orthographic: move along view Z only.
+            "  if (isPerspective > 0.5) { p.xyz *= (1.0 - depthPull); }"
+            "  else { p.z += depthPull * abs(p.z); }"
+            "  gl_Position = projectionMatrix * p;"
+            "  finalColor = color;"
+            "}"
+        )
+        info.fragment_source("void main() { fragColor = finalColor; }")
+        _heat_shader = gpu.shader.create_from_info(info)
+    return _heat_shader
+
+
 def _make_batches() -> None:
     import gpu
     from gpu_extras.batch import batch_for_shader
 
     state.batches.clear()
     if state.heat_positions is not None and len(state.heat_positions):
-        shader = gpu.shader.from_builtin("FLAT_COLOR")
+        shader = _get_heat_shader()
         batch = batch_for_shader(
             shader,
             "TRIS",
@@ -248,6 +299,12 @@ def _draw() -> None:
     gpu.state.depth_mask_set(False)
     if "heat" in state.batches:
         shader, batch = state.batches["heat"]
+        projection = gpu.matrix.get_projection_matrix()
+        shader.bind()
+        shader.uniform_float("modelViewMatrix", gpu.matrix.get_model_view_matrix())
+        shader.uniform_float("projectionMatrix", projection)
+        shader.uniform_float("depthPull", DEPTH_PULL)
+        shader.uniform_float("isPerspective", 1.0 if abs(projection[3][3]) < 0.5 else 0.0)
         batch.draw(shader)
     if "points" in state.batches:
         gpu.state.point_size_set(POINT_SIZE)

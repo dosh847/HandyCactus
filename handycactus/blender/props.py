@@ -28,6 +28,12 @@ def _on_preset_changed(self, _context):
     apply_preset(self, self.preset)
 
 
+def _on_units_changed(self, context):
+    from . import overlay  # overlay imports this module
+
+    overlay.invalidate()
+
+
 def _on_heatmap_toggled(self, context):
     from . import overlay  # overlay imports this module
 
@@ -59,6 +65,16 @@ def _build_settings_class():
             items=[(p.id, p.label, p.description) for p in PRESETS],
             default=DEFAULT_PRESET_ID,
             update=_on_preset_changed,
+        ),
+        "units": EnumProperty(
+            name="Units",
+            description="How Blender units map to millimetres",
+            items=[
+                ("MM", "1 Unit = 1 mm", "One Blender unit is one millimetre (how STL files import)"),
+                ("SCENE", "Scene Units", "Follow the scene's Unit Scale"),
+            ],
+            default="MM",
+            update=_on_units_changed,
         ),
         "show_heatmap": BoolProperty(
             name="Overhang Heatmap",

@@ -28,6 +28,22 @@ PATCH_LOWEST = 2  # lowest point of an overhang patch
 
 PAINT_THRESHOLD = 0.5
 MAX_CANDIDATES = 400_000
+# A 50 mm mini needs a few hundred to a few thousand contacts. Far more means
+# the model is not in millimetres (see the Units setting), so stop early.
+MAX_CONTACTS = 20_000
+_PACKING = 0.7  # Poisson-disk samples per spacing² of area, roughly
+
+
+class TooManyContacts(ValueError):
+    def __init__(self, estimate: int, overhang_area_mm2: float):
+        self.estimate = estimate
+        self.overhang_area_mm2 = overhang_area_mm2
+        super().__init__(
+            f"About {estimate:,} contacts would be needed for {overhang_area_mm2:,.0f} mm² of overhang. "
+            "Is the model in millimetres? Check the Units setting."
+        )
+
+
 _EPS = 1e-3  # mm
 MINIMUM_DEPTH = 0.01  # mm, spec 6.2 step 2
 
@@ -145,6 +161,10 @@ def detect(
 
     # Poisson-disk samples, seeded with the forced contacts.
     spacing = params.tip_spacing / (1.0 + (params.steepness_density - 1.0) * np.clip(severity, 0.0, 1.0))
+    area = mesh.face_areas[sample_faces]
+    estimate = int(_PACKING * (area / spacing[sample_faces] ** 2).sum())
+    if estimate > MAX_CONTACTS:
+        raise TooManyContacts(estimate, float(area.sum()))
     rng = np.random.default_rng(seed)
     s_pos, s_face = _poisson_samples(mesh, sample_faces, spacing, forced_pos, rng)
 

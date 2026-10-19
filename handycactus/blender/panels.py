@@ -8,6 +8,7 @@ from bpy.types import Panel
 
 from ..core.params import GROUPS, PARAM_SPECS
 from . import overlay
+from .mesh_io import set_size_mm
 from .operators import (
     HANDYCACTUS_OT_apply_preset,
     HANDYCACTUS_OT_clear_preview,
@@ -15,6 +16,9 @@ from .operators import (
     HANDYCACTUS_OT_preview_contacts,
 )
 from .props import settings_to_params
+
+# Bigger than any miniature: probably a units mismatch.
+LARGE_MODEL_MM = 500.0
 
 UNIT_SUFFIX = {"mm": "mm", "deg": "°", "mm/mm": "mm/mm", "x": "×", "": ""}
 
@@ -40,6 +44,12 @@ class HANDYCACTUS_PT_main(_HCPanel, Panel):
         targets = overlay.current_set(context)
         box = layout.box()
         box.label(text=f"Targets: {len(targets)} selected mesh object(s)", icon="OBJECT_DATA")
+        box.prop(settings, "units", text="Units")
+        size = set_size_mm(targets, context.scene)
+        if size is not None:
+            box.label(text="Size: " + " × ".join(f"{v:,.1f}" for v in size) + " mm")
+            if max(size) > LARGE_MODEL_MM:
+                box.label(text="Larger than a mini; check Units", icon="ERROR")
         box.operator(HANDYCACTUS_OT_place_on_bed.bl_idname, icon="TRIA_DOWN_BAR")
 
         box = layout.box()

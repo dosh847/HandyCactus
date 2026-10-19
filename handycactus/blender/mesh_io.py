@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import numpy as np
+from mathutils import Vector
 
 from ..core.mesh_data import TargetMesh
 from ..core.units import mm_per_bu
@@ -13,7 +14,25 @@ BLOCK_GROUP = "HC_Block"
 
 
 def scene_mm_per_bu(scene) -> float:
+    """Millimetres per Blender unit under the HandyCactus units setting.
+
+    "MM" (default) treats 1 unit as 1 mm, which is how STL files land in a
+    default scene. "SCENE" follows the scene's Unit Scale.
+    """
+    if scene.handycactus.units == "MM":
+        return 1.0
     return mm_per_bu(scene.unit_settings.scale_length)
+
+
+def set_size_mm(objects, scene) -> tuple[float, float, float] | None:
+    """World-space bounding box size of the objects in mm (from bound boxes; cheap)."""
+    corners = [ob.matrix_world @ Vector(c) for ob in objects for c in ob.bound_box]
+    if not corners:
+        return None
+    scale = scene_mm_per_bu(scene)
+    lo = [min(c[i] for c in corners) for i in range(3)]
+    hi = [max(c[i] for c in corners) for i in range(3)]
+    return tuple((hi[i] - lo[i]) * scale for i in range(3))
 
 
 def read_target(obj, depsgraph, scale_mm: float, with_weights: bool = True) -> TargetMesh:

@@ -179,3 +179,10 @@ def test_float_noise_on_flat_faces_is_not_a_minimum():
     minima = r.contacts.positions[r.contacts.kind == det.MINIMUM]
     assert len(minima) == 0
     assert np.allclose(r.contacts.positions[:, 2], 3.0, atol=1e-5)
+
+
+def test_metre_sized_model_is_refused_with_a_units_hint():
+    # A 10 m box (a mini imported as metres) would need ~100k contacts on its underside.
+    huge = voxels([((0, 0, 1000), (10000, 10000, 2000))], voxel=1000.0)
+    with pytest.raises(det.TooManyContacts, match="Units"):
+        run(huge)
