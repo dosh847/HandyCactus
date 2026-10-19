@@ -29,8 +29,8 @@ class InsideTester(Protocol):
     bounds_min: np.ndarray  # (3,)
     bounds_max: np.ndarray  # (3,)
 
-    def is_inside(self, points: np.ndarray) -> np.ndarray:
-        """(N, 3) points -> (N,) bool."""
+    def is_inside(self, points: np.ndarray, rays: int = 3) -> np.ndarray:
+        """(N, 3) points -> (N,) bool. `rays` = 1 trades robustness at edges for speed."""
         ...
 
 
@@ -51,14 +51,14 @@ class NumpyInsideTester:
         self.bounds_min = verts.min(axis=0) if len(verts) else np.zeros(3)
         self.bounds_max = verts.max(axis=0) if len(verts) else np.zeros(3)
 
-    def is_inside(self, points: np.ndarray) -> np.ndarray:
+    def is_inside(self, points: np.ndarray, rays: int = 3) -> np.ndarray:
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
         result = np.zeros(len(points), dtype=bool)
         candidates = np.flatnonzero(in_bounds(points, self.bounds_min, self.bounds_max))
         for start in range(0, len(candidates), 256):
             idx = candidates[start : start + 256]
-            votes = sum(self._winding(points[idx], d) > 0 for d in PARITY_DIRECTIONS)
-            result[idx] = votes >= 2
+            votes = sum(self._winding(points[idx], d) > 0 for d in PARITY_DIRECTIONS[:rays])
+            result[idx] = votes * 2 > rays
         return result
 
     def _winding(self, origins: np.ndarray, direction: np.ndarray) -> np.ndarray:

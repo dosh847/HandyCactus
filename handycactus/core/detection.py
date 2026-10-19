@@ -270,7 +270,7 @@ def _anchored(points: np.ndarray, inside: Sequence[InsideTester | None], span: f
                 continue
             j = np.flatnonzero(todo & ~level_hit & in_bounds(probes, tester.bounds_min, tester.bounds_max))
             if len(j):
-                level_hit[j] = tester.is_inside(probes[j])
+                level_hit[j] = tester.is_inside(probes[j], rays=1)  # many probes; one ray each
         hit = level_hit.reshape(shape)
     # Nearest anchored material per direction, as a fraction of span (inf = none).
     radii = np.array(_BRIDGE_RADII)[None, :, None]
@@ -283,7 +283,7 @@ def _anchored(points: np.ndarray, inside: Sequence[InsideTester | None], span: f
 
 BRIDGE_DEPTH = 0.4  # × span below the point (0.8 mm at the default 2 mm max_bridge)
 _BRIDGE_LEVELS = (0.5, 1.0)  # × BRIDGE_DEPTH
-_BRIDGE_RADII = tuple(k / 8 for k in range(1, 9))
+_BRIDGE_RADII = (0.25, 0.5, 0.75, 1.0)
 _BRIDGE_AZIMUTHS = 12
 _BRIDGE_DISC = np.array(
     [

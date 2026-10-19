@@ -40,20 +40,21 @@ class BVHInsideTester:
         world_from_local = Matrix.Scale(scale_mm, 4) @ obj.evaluated_get(depsgraph).matrix_world
         return cls(bvh, bounds_min, bounds_max, world_from_local.inverted())
 
-    def is_inside(self, points: np.ndarray) -> np.ndarray:
+    def is_inside(self, points: np.ndarray, rays: int = 3) -> np.ndarray:
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
         out = np.zeros(len(points), dtype=bool)
         to_local = self._to_local
+        directions = self._directions[:rays]
         for i, p in enumerate(points.tolist()):
             v = Vector(p)
-            out[i] = self._inside(to_local @ v if to_local is not None else v)
+            out[i] = self._inside(to_local @ v if to_local is not None else v, directions)
         return out
 
-    def _inside(self, p: Vector) -> bool:
+    def _inside(self, p: Vector, directions) -> bool:
         # Ray winding number: along a ray, surface exits minus entries is positive inside
-        # (majority of 3 rays). Works for overlapping shells, where parity does not.
-        votes = sum(self._winding(p, d) > 0 for d in self._directions)
-        return votes >= 2
+        # (majority over the rays). Works for overlapping shells, where parity does not.
+        votes = sum(self._winding(p, d) > 0 for d in directions)
+        return votes * 2 > len(directions)
 
     def _winding(self, origin: Vector, direction: Vector) -> int:
         winding = 0

@@ -121,25 +121,26 @@ def build_tips(contacts: Contacts, params: Params, obstacles: Obstacles) -> Tips
 
 def _valid(p, axes, length, r_contact, r_knuckle, room, obstacles) -> np.ndarray:
     """Which candidate axes give a clear tip of this length at contact p, with `room` mm
-    of air around the knuckle for its branch."""
-    m = len(axes)
+    of air around the knuckle for its branch. Cheapest, most selective checks first."""
     knuckles = p + axes * length
     valid = knuckles[:, 2] >= r_knuckle  # knuckle above the bed
-    # The knuckle must look straight back at its own contact.
-    hit = obstacles.ray_distance(knuckles, -axes, length + 1.0)
-    valid &= hit >= length - HIT_TOLERANCE
-    # Cone and ball clear of the model, except right at the contact.
-    ts = np.linspace(min(NEAR_CONTACT, length / 2), length, 4)
-    samples = (p + axes[:, None, :] * ts[None, :, None]).reshape(-1, 3)
-    radius = r_contact + (r_knuckle - r_contact) * (ts / length)
-    need_per_t = radius + TIP_CLEARANCE
-    need_per_t[-1] = max(need_per_t[-1], room)  # the last sample is the knuckle
-    need = np.tile(need_per_t, m)
-    idx = np.flatnonzero(np.repeat(valid, len(ts)))
-    clear = np.zeros(len(samples), bool)
+    # Room around the knuckle (one query per axis; this is where most candidates fail).
+    idx = np.flatnonzero(valid)
     if len(idx):
-        clear[idx] = obstacles.nearest_distance(samples[idx]) >= need[idx] - 1e-9
-    valid &= clear.reshape(m, len(ts)).all(axis=1)
+        valid[idx] = obstacles.nearest_distance(knuckles[idx]) >= max(r_knuckle + TIP_CLEARANCE, room) - 1e-9
+    # The knuckle must look straight back at its own contact.
+    idx = np.flatnonzero(valid)
+    if len(idx):
+        hit = obstacles.ray_distance(knuckles[idx], -axes[idx], length + 1.0)
+        valid[idx] = hit >= length - HIT_TOLERANCE
+    # The cone clear of the model, except right at the contact.
+    idx = np.flatnonzero(valid)
+    if len(idx):
+        ts = np.linspace(min(NEAR_CONTACT, length / 2), length, 4)[:-1]  # the knuckle is done
+        radius = r_contact + (r_knuckle - r_contact) * (ts / length)
+        samples = (p + axes[idx, None, :] * ts[None, :, None]).reshape(-1, 3)
+        clear = obstacles.nearest_distance(samples) >= np.tile(radius + TIP_CLEARANCE, len(idx)) - 1e-9
+        valid[idx] = clear.reshape(len(idx), len(ts)).all(axis=1)
     return valid
 
 
@@ -152,13 +153,21 @@ def _separate_knuckles(knuckle, axis, length, ok, r_knuckle) -> None:
     if len(idx) < 2:
         return
     pts = knuckle[idx]
-    d = np.linalg.norm(pts[:, None] - pts[None], axis=2)
-    d[np.diag_indices(len(idx))] = np.inf
     gap = 2 * r_knuckle + 0.01
-    for a, b in zip(*np.nonzero(np.triu(d < 2 * r_knuckle)), strict=True):
-        lower, other = (idx[a], idx[b]) if pts[a, 2] <= pts[b, 2] else (idx[b], idx[a])
-        w = knuckle[lower] - knuckle[other]
-        wa = w @ axis[lower]
-        s = -wa + np.sqrt(max(wa * wa - (w @ w - gap * gap), 0.0))
-        length[lower] += max(s, 0.0)
-        knuckle[lower] = knuckle[lower] + axis[lower] * max(s, 0.0)
+    # Candidate pairs from a spatial hash with cells one knuckle diameter wide.
+    cell = np.floor(pts / (2 * r_knuckle)).astype(np.int64)
+    buckets: dict[tuple, list[int]] = {}
+    for i, c in enumerate(map(tuple, cell.tolist())):
+        buckets.setdefault(c, []).append(i)
+    offsets = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
+    for a, (cx, cy, cz) in enumerate(map(tuple, cell.tolist())):
+        for dx, dy, dz in offsets:
+            for b in buckets.get((cx + dx, cy + dy, cz + dz), ()):
+                if b <= a or np.linalg.norm(pts[a] - pts[b]) >= 2 * r_knuckle:
+                    continue
+                lower, other = (idx[a], idx[b]) if pts[a, 2] <= pts[b, 2] else (idx[b], idx[a])
+                w = knuckle[lower] - knuckle[other]
+                wa = w @ axis[lower]
+                ext = max(-wa + np.sqrt(max(wa * wa - (w @ w - gap * gap), 0.0)), 0.0)
+                length[lower] += ext
+                knuckle[lower] = knuckle[lower] + axis[lower] * ext
