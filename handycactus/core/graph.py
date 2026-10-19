@@ -14,6 +14,8 @@ KNUCKLE = 1
 BRANCH = 2
 JUNCTION = 3
 FOOT = 4
+LANDING = 5  # a branch ending on the model instead of the bed (a reversed tip)
+ROOT_KINDS = (FOOT, LANDING)
 
 # hc_flags bits.
 FLAG_MANUAL = 1
@@ -86,12 +88,14 @@ class SupportGraph:
             out.append("cycle in parent pointers")
             return out
         root_nodes = np.flatnonzero(self.parent < 0)
-        if np.any(self.kind[root_nodes] != FOOT):
-            out.append(f"{np.count_nonzero(self.kind[root_nodes] != FOOT)} root(s) are not feet")
-        if np.any(np.abs(self.pos[root_nodes, 2]) > FOOT_Z_TOLERANCE):
+        not_root_kind = ~np.isin(self.kind[root_nodes], ROOT_KINDS)
+        if np.any(not_root_kind):
+            out.append(f"{np.count_nonzero(not_root_kind)} root(s) are not feet or landings")
+        feet = root_nodes[self.kind[root_nodes] == FOOT]
+        if np.any(np.abs(self.pos[feet, 2]) > FOOT_Z_TOLERANCE):
             out.append("a foot is not on the bed")
-        if np.any((self.kind == FOOT) & (self.parent >= 0)):
-            out.append("a foot has a parent")
+        if np.any(np.isin(self.kind, ROOT_KINDS) & (self.parent >= 0)):
+            out.append("a foot or landing has a parent")
         contacts = np.flatnonzero(self.kind == CONTACT)
         if np.any(self.children_count()[contacts] > 0):
             out.append("a contact has children")
@@ -152,6 +156,11 @@ class GraphBuilder:
     def set_parent(self, node: int, parent: int) -> None:
         row = list(self._rows[node])
         row[3] = parent
+        self._rows[node] = tuple(row)
+
+    def set_sphere(self, node: int, radius: float) -> None:
+        row = list(self._rows[node])
+        row[7] = radius
         self._rows[node] = tuple(row)
 
     def set_kind(self, node: int, kind: int) -> None:

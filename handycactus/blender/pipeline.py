@@ -12,7 +12,7 @@ import numpy as np
 from mathutils import Matrix
 
 from ..core import checks, detection, routing, tips
-from ..core.graph import CONTACT, FOOT
+from ..core.graph import CONTACT, FOOT, LANDING
 from ..core.mesh_data import MeshData, combine
 from . import gn_builder, graph_io
 from .mesh_io import mesh_targets, read_target, scene_mm_per_bu
@@ -139,14 +139,7 @@ def generate(context, objects, support=None) -> GenerateResult:
 
     depsgraph = context.evaluated_depsgraph_get()
     trees = [world_bvh(ob, depsgraph, scale) for ob in objects]
-    testers = []
-    for i, tree in enumerate(trees):
-        if mesh.non_manifold_edge_count(i):
-            testers.append(None)
-        else:
-            lo, hi = _bounds(mesh, i)
-            testers.append(BVHInsideTester(tree, lo, hi))
-    found = detection.detect(mesh, params, testers)  # may raise TooManyContacts
+    found = detection.detect(mesh, params, _testers_from(trees, mesh))  # may raise TooManyContacts
     obstacles = BVHObstacles(trees)
     built = tips.build_tips(found.contacts, params, obstacles)
     routed = routing.route(built, params, obstacles)
@@ -165,11 +158,12 @@ def generate(context, objects, support=None) -> GenerateResult:
         info.targets.add().obj = ob
     info.set_params(params)
     info.tip_count = int((graph.kind == CONTACT).sum())
-    info.tree_count = int((graph.kind == FOOT).sum())
+    info.tree_count = int((graph.kind == FOOT).sum() + (graph.kind == LANDING).sum())
+    info.landing_count = int((graph.kind == LANDING).sum())
     info.unreachable_count = len(routed.unreachable_tips)
     unreachable = built.surface[routed.unreachable_tips]
     info.unreachable_json = json.dumps(np.round(unreachable, 4).tolist())
-    info.set_findings(checks.run_checks(graph, params, mesh, obstacles, unreachable))
+    info.set_findings(checks.run_checks(graph, params, mesh, obstacles, unreachable, found.support_faces))
     info.seconds = time.perf_counter() - start
     return GenerateResult(
         support=support,
@@ -179,6 +173,18 @@ def generate(context, objects, support=None) -> GenerateResult:
         unreachable_points=built.surface[routed.unreachable_tips],
         seconds=info.seconds,
     )
+
+
+def _testers_from(trees, mesh: MeshData) -> list:
+    """Inside testers on world-space BVHs; None for open targets."""
+    testers = []
+    for i, tree in enumerate(trees):
+        if mesh.non_manifold_edge_count(i):
+            testers.append(None)
+        else:
+            lo, hi = _bounds(mesh, i)
+            testers.append(BVHInsideTester(tree, lo, hi))
+    return testers
 
 
 def _new_support_object(context, objects):
@@ -204,10 +210,15 @@ def check_support(context, support) -> list:
     scale = scene_mm_per_bu(context.scene)
     params = info.params() or settings_to_params(context.scene.handycactus)
     graph = read_support_graph(context, support)
-    mesh = read_set(context, objects) if objects else None
-    depsgraph = context.evaluated_depsgraph_get()
-    obstacles = BVHObstacles([world_bvh(ob, depsgraph, scale) for ob in objects]) if objects else None
-    findings = checks.run_checks(graph, params, mesh, obstacles, info.unreachable_points())
+    mesh = support_faces = obstacles = None
+    if objects:
+        mesh = read_set(context, objects)
+        depsgraph = context.evaluated_depsgraph_get()
+        trees = [world_bvh(ob, depsgraph, scale) for ob in objects]
+        obstacles = BVHObstacles(trees)
+        # Detection's face mask (not the angle-only estimate) so buried faces are not gaps.
+        support_faces = detection.detect(mesh, params, _testers_from(trees, mesh)).support_faces
+    findings = checks.run_checks(graph, params, mesh, obstacles, info.unreachable_points(), support_faces)
     info.set_findings(findings)
     return findings
 

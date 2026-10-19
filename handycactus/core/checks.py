@@ -13,9 +13,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .detection import needs_support
-from .graph import CONTACT, FOOT, JUNCTION, KNUCKLE, SupportGraph
-from .heatmap import within
+from .graph import CONTACT, FOOT, JUNCTION, KNUCKLE, LANDING, SupportGraph
+from .heatmap import estimate_support_faces, within
 from .mesh_data import MeshData, connected_components
 from .params import Params
 from .spatial import Obstacles
@@ -23,6 +22,8 @@ from .tips import BRANCH_HARD_CLEARANCE
 
 ERROR = "ERROR"
 WARNING = "WARNING"
+INFO = "INFO"  # not a problem, but worth seeing (e.g. where branches land on the model)
+_SEVERITY_ORDER = {ERROR: 0, WARNING: 1, INFO: 2}
 
 STEEP_TOLERANCE_DEG = 5.0
 SLENDERNESS_LIMIT = 40.0
@@ -32,7 +33,7 @@ COLLISION_SAMPLE_MM = 0.5
 
 @dataclass(frozen=True)
 class Finding:
-    code: str  # graph, unreachable, coverage, thin, steep, collision, slender, foot
+    code: str  # graph, unreachable, coverage, thin, steep, collision, slender, foot, landing
     severity: str  # ERROR or WARNING
     message: str
     location: tuple[float, float, float]  # mm
@@ -48,8 +49,10 @@ def run_checks(
     mesh: MeshData | None = None,
     obstacles: Obstacles | None = None,
     unreachable: np.ndarray | None = None,
+    support_faces: np.ndarray | None = None,
 ) -> list[Finding]:
-    """All checks. `mesh` enables coverage, `obstacles` enables collision."""
+    """All checks. `mesh` enables coverage (on `support_faces` from detection when given),
+    `obstacles` enables collision."""
     findings = check_graph(graph)
     if any(f.code == "graph" for f in findings):
         return findings  # the rest assume a valid forest
@@ -58,11 +61,12 @@ def run_checks(
     findings += check_steep(graph, params)
     findings += check_slender(graph)
     findings += check_feet(graph, params)
+    findings += check_landings(graph)
     if obstacles is not None:
         findings += check_collision(graph, params, obstacles)
     if mesh is not None:
-        findings += check_coverage(graph, params, mesh)
-    findings.sort(key=lambda f: (f.severity != ERROR, f.code))
+        findings += check_coverage(graph, params, mesh, support_faces)
+    findings.sort(key=lambda f: (_SEVERITY_ORDER[f.severity], f.code))
     return findings
 
 
@@ -82,9 +86,11 @@ def check_unreachable(points: np.ndarray | None) -> list[Finding]:
 
 
 def _edges(graph: SupportGraph, include_tips: bool = False) -> np.ndarray:
+    """Graph edges; without tips, contact tips and landing tips (thin and touching the
+    model by design) are left out."""
     e = graph.edges
     if not include_tips:
-        e = e[graph.kind[e[:, 0]] != CONTACT]
+        e = e[(graph.kind[e[:, 0]] != CONTACT) & (graph.kind[e[:, 1]] != LANDING)]
     return e
 
 
@@ -221,11 +227,21 @@ def check_feet(graph: SupportGraph, params: Params) -> list[Finding]:
     ]
 
 
-def check_coverage(graph: SupportGraph, params: Params, mesh: MeshData) -> list[Finding]:
+def check_landings(graph: SupportGraph) -> list[Finding]:
+    return [
+        Finding("landing", INFO, f"Tree {graph.tree[n]}: branch lands on the model (leaves a small mark)",
+                tuple(graph.pos[n]))
+        for n in np.flatnonzero(graph.kind == LANDING)
+    ]  # fmt: skip
+
+
+def check_coverage(
+    graph: SupportGraph, params: Params, mesh: MeshData, support_faces: np.ndarray | None = None
+) -> list[Finding]:
     """Overhang regions with no contact within COVERAGE_FACTOR × tip_spacing."""
-    support = needs_support(mesh.face_normals, params.overhang_angle) & (mesh.face_areas > 0)
-    support &= mesh.face_min_z >= params.bed_ignore_height
-    faces = np.flatnonzero(support)
+    if support_faces is None:
+        support_faces = estimate_support_faces(mesh, params)
+    faces = np.flatnonzero(support_faces)
     if len(faces) == 0:
         return []
     contact = np.flatnonzero(graph.kind == CONTACT)

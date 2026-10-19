@@ -39,12 +39,15 @@ def in_bounds(points: np.ndarray, lo: np.ndarray, hi: np.ndarray, pad: float = 1
 
 
 class NumpyInsideTester:
-    """Ray-parity inside test against one target's triangles (majority of 3 rays)."""
+    """Inside test against one target's triangles by ray winding number: along a ray, surface
+    exits minus entries is positive inside (majority of 3 skewed rays). Works for closed
+    meshes made of overlapping shells, where crossing parity does not."""
 
     def __init__(self, verts: np.ndarray, tris: np.ndarray):
         self._a = verts[tris[:, 0]]
         self._e1 = verts[tris[:, 1]] - self._a
         self._e2 = verts[tris[:, 2]] - self._a
+        self._n = np.cross(self._e1, self._e2)
         self.bounds_min = verts.min(axis=0) if len(verts) else np.zeros(3)
         self.bounds_max = verts.max(axis=0) if len(verts) else np.zeros(3)
 
@@ -54,11 +57,11 @@ class NumpyInsideTester:
         candidates = np.flatnonzero(in_bounds(points, self.bounds_min, self.bounds_max))
         for start in range(0, len(candidates), 256):
             idx = candidates[start : start + 256]
-            votes = sum(self._odd_crossings(points[idx], d) for d in PARITY_DIRECTIONS)
+            votes = sum(self._winding(points[idx], d) > 0 for d in PARITY_DIRECTIONS)
             result[idx] = votes >= 2
         return result
 
-    def _odd_crossings(self, origins: np.ndarray, direction: np.ndarray) -> np.ndarray:
+    def _winding(self, origins: np.ndarray, direction: np.ndarray) -> np.ndarray:
         # Möller–Trumbore, origins (P, 3) against all triangles (T, 3).
         pvec = np.cross(direction, self._e2)  # (T, 3)
         det = np.einsum("ij,ij->i", self._e1, pvec)  # (T,)
@@ -70,7 +73,8 @@ class NumpyInsideTester:
         v = np.einsum("ptj,j->pt", qvec, direction) * inv
         t = np.einsum("ptj,tj->pt", qvec, self._e2) * inv
         hit = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-9)
-        return np.count_nonzero(hit, axis=1) % 2 == 1
+        exits = np.sign(self._n @ direction)  # +1 leaving a shell, -1 entering
+        return (hit * exits[None, :]).sum(axis=1)
 
 
 class Obstacles(Protocol):
@@ -82,6 +86,12 @@ class Obstacles(Protocol):
 
     def ray_distance(self, origins: np.ndarray, directions: np.ndarray, max_distance: float) -> np.ndarray:
         """(N, 3), (N, 3) unit -> (N,) distance to the first hit, inf if none within max_distance."""
+        ...
+
+    def ray_hit(
+        self, origins: np.ndarray, directions: np.ndarray, max_distance: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Like ray_distance, plus the unit surface normal at each hit ((N, 3), zero if none)."""
         ...
 
 
@@ -103,10 +113,16 @@ class NumpyObstacles:
         return out
 
     def ray_distance(self, origins: np.ndarray, directions: np.ndarray, max_distance: float) -> np.ndarray:
+        return self.ray_hit(origins, directions, max_distance)[0]
+
+    def ray_hit(self, origins, directions, max_distance):
         origins = np.asarray(origins, dtype=np.float64).reshape(-1, 3)
         directions = np.asarray(directions, dtype=np.float64).reshape(-1, 3)
         e1, e2 = self._b - self._a, self._c - self._a
+        face_n = np.cross(e1, e2)
+        face_n /= np.maximum(np.linalg.norm(face_n, axis=1), 1e-12)[:, None]
         out = np.full(len(origins), np.inf)
+        normals = np.zeros((len(origins), 3))
         for i, (o, d) in enumerate(zip(origins, directions, strict=True)):
             pvec = np.cross(d, e2)
             det = np.einsum("ij,ij->i", e1, pvec)
@@ -119,8 +135,9 @@ class NumpyObstacles:
             t = np.einsum("ij,ij->i", qvec, e2) * inv
             hit = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-9) & (t <= max_distance)
             if hit.any():
-                out[i] = t[hit].min()
-        return out
+                j = np.flatnonzero(hit)[np.argmin(t[hit])]
+                out[i], normals[i] = t[j], face_n[j]
+        return out, normals
 
 
 def closest_point_on_triangles(p, a, b, c):

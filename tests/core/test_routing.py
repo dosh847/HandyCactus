@@ -86,13 +86,39 @@ def test_branches_keep_clear_of_the_model():
     assert np.percentile(d - g.radius[body], 5) > 0.2
 
 
-def test_trapped_tips_are_reported_unreachable():
-    # A canopy over a wide plate lying on the bed: under the canopy there is no bed to reach,
-    # and v1 never lands on the model.
-    shape = voxels([((0, 0, 0), (12, 12, 1)), ((5, 5, 1), (7, 7, 6)), ((2, 2, 6), (10, 10, 7))])
-    _, t, r, _ = generate(shape)
+CANOPY = [((0, 0, 0), (12, 12, 1)), ((5, 5, 1), (7, 7, 6)), ((2, 2, 6), (10, 10, 7))]
+
+
+def test_trapped_tips_are_unreachable_without_landing():
+    # A canopy over a wide plate lying on the bed: under the canopy there is no bed to reach.
+    _, t, r, _ = generate(voxels(CANOPY), params=Params().with_values({"land_on_model": 0}))
     assert len(r.unreachable_tips) > 0
     assert r.graph.problems() == []
+    assert (r.graph.kind == G.LANDING).sum() == 0
+
+
+def test_trapped_tips_land_on_the_model():
+    _, t, r, obstacles = generate(voxels(CANOPY))
+    g = r.graph
+    assert g.problems() == []
+    landings = np.flatnonzero(g.kind == G.LANDING)
+    assert len(landings) > 0
+    assert len(r.unreachable_tips) == 0
+    # Landings sit on the plate's top (z = 1), just inside it. The plate covers the whole bed
+    # around the canopy, so they may be anywhere on it.
+    assert np.allclose(g.pos[landings, 2], 1.0 - Params().penetration, atol=0.05)
+    assert np.all((g.pos[landings, :2] > 0) & (g.pos[landings, :2] < 12))
+    # A landing tip tapers to the contact diameter and has a break ball above it.
+    assert np.allclose(g.radius[landings], Params().contact_diameter / 2)
+    above = np.array([np.flatnonzero(g.parent == n)[0] for n in landings])
+    assert np.all(g.sphere[above] > 0)
+    assert branch_angles(g).max() <= Params().max_branch_angle + 1e-6
+
+
+def test_bed_is_preferred_over_landing():
+    # A free-standing box: everything reaches the bed, nothing lands.
+    _, _, r, _ = generate(voxels([((0, 0, 10), (8, 8, 14))]))
+    assert (r.graph.kind == G.LANDING).sum() == 0
 
 
 def test_multi_target_trees_may_merge():

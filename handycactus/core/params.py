@@ -34,7 +34,7 @@ class ParamSpec:
     default: float | int
     min: float | int
     max: float | int
-    unit: str  # "mm", "deg", "mm/mm", "x" or "" (plain count)
+    unit: str  # "mm", "deg", "mm/mm", "x", "bool" (0/1 switch) or "" (plain count)
     description: str
 
     @property
@@ -245,6 +245,17 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         "mm",
         "Vertical step of the downward routing sweep",
     ),
+    ParamSpec(
+        "land_on_model",
+        "branches",
+        "Land on Model",
+        1,
+        0,
+        1,
+        "bool",
+        "Let branches with no way to the bed land on an upward-facing part of the model "
+        "(leaves a small mark to clean up)",
+    ),
     # Feet
     ParamSpec(
         "foot_radius", "feet", "Foot Radius", 1.5, 0.0, 6.0, "mm", "Radius of the flared foot on the bed"
@@ -296,6 +307,7 @@ class Params:
     merge_growth: float = _default("merge_growth")
     model_clearance: float = _default("model_clearance")
     step_z: float = _default("step_z")
+    land_on_model: int = _default("land_on_model")
     foot_radius: float = _default("foot_radius")
     foot_height: float = _default("foot_height")
     profile_resolution: int = _default("profile_resolution")

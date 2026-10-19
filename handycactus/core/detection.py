@@ -111,8 +111,11 @@ def detect(
     severity = overhang_severity(mesh.face_normals, params.overhang_angle)
     overhang = needs_support(mesh.face_normals, params.overhang_angle) & (mesh.face_areas > 0)
     near_bed = mesh.face_min_z < params.bed_ignore_height
-    face_inside = _inside_other(mesh.face_centroids, mesh.face_target, inside)
-    support = (overhang | face_force) & ~near_bed & ~face_inside
+    candidate = (overhang | face_force) & ~near_bed
+    face_buried = np.zeros(len(mesh.tris), dtype=bool)
+    c = np.flatnonzero(candidate)
+    face_buried[c] = _buried(mesh.face_centroids[c], mesh.face_normals[c], inside)
+    support = candidate & ~face_buried
     sample_faces = support & ~face_block
 
     # Patches: support faces connected through shared edges.
@@ -126,13 +129,13 @@ def detect(
     blocked = []
     minima = _local_minima(mesh, vnormals)
     minima = minima[z[minima] >= params.bed_ignore_height]
-    minima = minima[~_inside_other(mesh.verts[minima], mesh.vert_target[minima], inside)]
+    minima = minima[~_buried(mesh.verts[minima], vnormals[minima], inside)]
     is_blocked = mesh.block_weights[minima] > PAINT_THRESHOLD
     blocked.append(mesh.verts[minima[is_blocked]])
     minima = minima[~is_blocked]
 
     lowest, lowest_patch, lowest_face = _patch_lowest_vertices(mesh, patch)
-    keep = ~_inside_other(mesh.verts[lowest], mesh.vert_target[lowest], inside)
+    keep = ~_buried(mesh.verts[lowest], mesh.face_normals[lowest_face], inside)
     keep &= ~_anchored(mesh.verts[lowest], inside, params.max_bridge)
     lowest, lowest_face = lowest[keep], lowest_face[keep]
     is_blocked = mesh.block_weights[lowest] > PAINT_THRESHOLD
@@ -172,7 +175,7 @@ def detect(
     # Painted (HC_Force) samples are wanted by the user even where they could bridge.
     keep = ~_anchored(s_pos, inside, params.max_bridge) | face_force[s_face]
     stats["samples_after_bridging"] = int(keep.sum())
-    keep &= ~_inside_other(s_pos, mesh.face_target[s_face], inside)
+    keep &= ~_buried(s_pos, mesh.face_normals[s_face], inside)
     stats["samples_after_inside"] = int(keep.sum())
     s_pos, s_face = s_pos[keep], s_face[keep]
 
@@ -185,16 +188,25 @@ def detect(
     return DetectionResult(contacts, support, patch, np.concatenate(blocked), warnings, stats)
 
 
-def _inside_other(points: np.ndarray, owner: np.ndarray, inside: Sequence[InsideTester | None]) -> np.ndarray:
-    """True where a point is inside a target other than the one it belongs to."""
+def _buried(points: np.ndarray, normals: np.ndarray, inside: Sequence[InsideTester | None]) -> np.ndarray:
+    """True where a surface point is buried: just outside it (along its normal) is still solid.
+
+    That happens where one target pokes into another (an arm into a body), and inside a
+    single target made of overlapping shells (feathers pushed into each other), which
+    many sculpted minis are. A buried surface never prints, so it needs no support.
+    """
+    probes = points + normals * BURIED_PROBE_MM
     out = np.zeros(len(points), dtype=bool)
-    for t, tester in enumerate(inside):
+    for tester in inside:
         if tester is None:
             continue
-        idx = np.flatnonzero((owner != t) & ~out & in_bounds(points, tester.bounds_min, tester.bounds_max))
+        idx = np.flatnonzero(~out & in_bounds(probes, tester.bounds_min, tester.bounds_max))
         if len(idx):
-            out[idx] = tester.is_inside(points[idx])
+            out[idx] = tester.is_inside(probes[idx])
     return out
+
+
+BURIED_PROBE_MM = 0.02
 
 
 def _local_minima(mesh: MeshData, vertex_normals: np.ndarray) -> np.ndarray:

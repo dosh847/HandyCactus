@@ -19,11 +19,15 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .graph import BRANCH, CONTACT, FOOT, JUNCTION, KNUCKLE, GraphBuilder, SupportGraph
+from .graph import BRANCH, CONTACT, FOOT, JUNCTION, KNUCKLE, LANDING, ROOT_KINDS, GraphBuilder, SupportGraph
 from .params import Params
 from .spatial import Obstacles
 from .tips import BRANCH_HARD_CLEARANCE, Tips
 
+# Landing on the model: a landing tip is at most LANDING_REACH × tip_length long and
+# needs a surface facing up at least this much (normal z).
+LANDING_REACH = 2.0
+LANDING_MIN_UP = 0.3
 MERGE_SLACK = 0.3  # mm beyond the larger radius at which two heads merge
 # Branches aim for radius + model_clearance from the model, but may pass as close as
 # radius + HARD_CLEARANCE when that is the only way down.
@@ -48,6 +52,7 @@ class _Head:
     reach: float = 0.0  # horizontal reach of this level's move (cone limit)
     blocked: bool = False  # the model is straight below: escaping, not merging
     escape: np.ndarray | None = None  # unit direction of a straight free path to the bed
+    landing: np.ndarray | None = None  # model surface point this head is heading for
 
 
 def route(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
@@ -79,19 +84,31 @@ def route(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
         awake = [h for h in heads if h.awake]
         targets = _desired_xy(awake, heads, params, obstacles, tan, new_level)
         moved: list[_Head] = []
+        landing = bool(params.land_on_model)
         for h, target_xy in zip(awake, targets, strict=True):
+            if landing and h.landing is not None and _land(b, h, h.landing, params, obstacles, tan):
+                continue  # done: this head ends on the model
             new_pos = _move(h, target_xy, new_level, params, obstacles, tan)
             if new_pos is None:
-                stuck_nodes.append(h.node)
+                spot = (
+                    _find_landing(h.pos, obstacles, tan, LANDING_REACH * params.tip_length)
+                    if landing
+                    else None
+                )
+                if spot is None or not _land(b, h, spot, params, obstacles, tan):
+                    stuck_nodes.append(h.node)
                 continue
             dz = h.pos[2] - new_level
-            h.radius = min(params.max_radius, h.radius + params.taper_rate * dz)
+            # Grow with the taper, but never into the hard clearance next to the model.
+            room = float(obstacles.nearest_distance(new_pos[None])[0]) - HARD_CLEARANCE
+            grown = min(params.max_radius, h.radius + params.taper_rate * dz)
+            h.radius = max(min(grown, room), min(h.radius, grown), params.min_radius)
             h.prev, h.reach = h.pos, dz * tan
             h.pos = new_pos
             moved.append(h)
         stuck = {id(h) for h in awake} - {id(h) for h in moved}
         heads = [h for h in heads if id(h) not in stuck]
-        _merge_and_extend(b, [h for h in heads if h.awake], heads, params)
+        _merge_and_extend(b, [h for h in heads if h.awake], heads, params, obstacles)
         level = new_level
 
     for h in heads:  # flared feet
@@ -103,7 +120,7 @@ def route(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
             b.set_kind(h.node, FOOT)
 
     graph = b.build()
-    graph = _drop_rootless(graph)
+    graph = _drop_rootless(graph)  # stuck trees
     graph = _decimate(graph)
     graph.renumber_trees()
     junction = graph.kind == JUNCTION
@@ -146,6 +163,15 @@ def _desired_xy(awake, heads, params, obstacles, tan, new_level) -> list[np.ndar
     for i, h in enumerate(awake):
         if h.blocked:
             direction = _escape(h, obstacles, tan)
+            if h.escape is not None:
+                h.landing = None
+            elif params.land_on_model:
+                # No way to the bed: head for a spot on the model to land on.
+                if h.landing is None:
+                    h.landing = _find_landing(h.pos, obstacles, tan, np.inf)
+                if h.landing is not None:
+                    out.append(h.landing[:2].copy())
+                    continue
             dz = h.pos[2] - new_level
             out.append(h.pos[:2] + direction[:2] / max(-direction[2], 1e-6) * dz)
         elif has_partner[i]:
@@ -170,10 +196,7 @@ def _escape(h, obstacles, tan) -> np.ndarray:
     """
     if h.escape is not None and _reaches_bed(h.pos, h.escape[None], obstacles)[0]:
         return h.escape
-    dirs = _ESCAPE_DIRS_CACHE.get(tan)
-    if dirs is None:
-        dirs = _cone_directions(np.degrees(np.arctan(tan)))
-        _ESCAPE_DIRS_CACHE[tan] = dirs
+    dirs = _cone_dirs(tan)
     free = _reaches_bed(h.pos, dirs, obstacles)
     if free.any():
         h.escape = dirs[int(np.argmax(free))]  # dirs are ordered most vertical first
@@ -182,6 +205,47 @@ def _escape(h, obstacles, tan) -> np.ndarray:
     length = h.pos[2] / np.maximum(-dirs[:, 2], 1e-6)
     dist = obstacles.ray_distance(np.tile(h.pos, (len(dirs), 1)), dirs, float(length.max()) + 1.0)
     return dirs[int(np.argmax(np.where(np.isfinite(dist), dist, length)))]
+
+
+def _find_landing(pos, obstacles, tan, max_distance) -> np.ndarray | None:
+    """The nearest-to-vertical upward-facing model surface point inside the cone, if any."""
+    dirs = _cone_dirs(tan)
+    reach = min(max_distance, pos[2] + 1.0) if np.isfinite(max_distance) else pos[2] + 1.0
+    dist, normals = obstacles.ray_hit(np.tile(pos, (len(dirs), 1)), dirs, float(reach))
+    ok = np.isfinite(dist) & (dist <= max_distance) & (normals[:, 2] >= LANDING_MIN_UP)
+    if not ok.any():
+        return None
+    i = int(np.argmax(ok))  # dirs are ordered most vertical first
+    return pos + dirs[i] * dist[i]
+
+
+def _land(b: GraphBuilder, h, spot, params, obstacles, tan) -> bool:
+    """End the head with a landing tip onto `spot` if it is close, inside the cone and in sight."""
+    v = spot - h.pos
+    dist = float(np.linalg.norm(v))
+    if dist > LANDING_REACH * params.tip_length or dist < 1e-6:
+        return False
+    direction = v / dist
+    if -direction[2] < np.cos(np.arctan(tan)) - 1e-9:
+        return False  # would lean more than max_branch_angle
+    hit, normal = obstacles.ray_hit(h.pos[None], direction[None], dist + 0.5)
+    if not np.isfinite(hit[0]) or hit[0] < dist - 0.05 or normal[0, 2] < LANDING_MIN_UP:
+        return False  # something else is in the way, or the surface faces down
+    b.set_sphere(h.node, params.knuckle_diameter / 2)  # break point above the landing tip
+    land = b.add(
+        h.pos + direction * (hit[0] + params.penetration), LANDING, params.contact_diameter / 2,
+        direction=-direction,
+    )  # fmt: skip
+    b.set_parent(h.node, land)
+    return True
+
+
+def _cone_dirs(tan) -> np.ndarray:
+    dirs = _ESCAPE_DIRS_CACHE.get(tan)
+    if dirs is None:
+        dirs = _cone_directions(np.degrees(np.arctan(tan)))
+        _ESCAPE_DIRS_CACHE[tan] = dirs
+    return dirs
 
 
 def _reaches_bed(pos, dirs, obstacles) -> np.ndarray:
@@ -241,7 +305,7 @@ def _move(h, target_xy, new_level, params, obstacles, tan) -> np.ndarray | None:
     return None
 
 
-def _merge_and_extend(b: GraphBuilder, awake, heads, params) -> None:
+def _merge_and_extend(b: GraphBuilder, awake, heads, params, obstacles) -> None:
     """Add this level's nodes: junctions for touching heads, plain branch nodes otherwise."""
     if not awake:
         return
@@ -268,6 +332,11 @@ def _merge_and_extend(b: GraphBuilder, awake, heads, params) -> None:
         # Every member must reach the junction from its previous node inside its cone.
         return bool(np.all(np.linalg.norm(prev[idx] - p[:2], axis=1) <= reach[idx]))
 
+    def has_room(idx, p):
+        # The merged (thicker) branch must keep the hard clearance at the junction.
+        r = min(params.max_radius, float(np.sqrt((rad[idx] ** 2).sum())) * params.merge_growth)
+        return float(obstacles.nearest_distance(p[None])[0]) >= r + HARD_CLEARANCE
+
     blocked = np.array([h.blocked for h in awake])
     pairs = np.argwhere(np.triu((d <= limit) & ~blocked[:, None] & ~blocked[None, :], k=1))
     for i, j in sorted(pairs.tolist(), key=lambda ij: d[ij[0], ij[1]]):
@@ -275,7 +344,8 @@ def _merge_and_extend(b: GraphBuilder, awake, heads, params) -> None:
         if gi == gj:
             continue
         idx = np.array([k for k in range(len(awake)) if find(k) in (gi, gj)])
-        if within_cone(idx, junction(idx)):
+        p = junction(idx)
+        if within_cone(idx, p) and has_room(idx, p):
             group[gi] = gj
     members: dict[int, list[int]] = {}
     for i in range(len(awake)):
@@ -305,7 +375,7 @@ def _drop_rootless(graph: SupportGraph) -> SupportGraph:
     if len(graph) == 0:
         return graph
     roots = graph.roots()
-    return graph.subset(graph.kind[roots] == FOOT)
+    return graph.subset(np.isin(graph.kind[roots], ROOT_KINDS))
 
 
 def _decimate(graph: SupportGraph) -> SupportGraph:
@@ -322,8 +392,8 @@ def _decimate(graph: SupportGraph) -> SupportGraph:
     cos_limit = np.cos(np.radians(DECIMATE_DEGREES))
     for node in np.flatnonzero((graph.kind == BRANCH) & (children == 1)):
         c, p = child_of[node], parent[node]
-        if p < 0 or c < 0 or graph.kind[p] == FOOT:
-            continue  # the node above a foot sets where the flare starts
+        if p < 0 or c < 0 or graph.kind[p] in ROOT_KINDS:
+            continue  # the node above a foot or landing sets where the flare / tip starts
         a = graph.pos[node] - graph.pos[c]
         bvec = graph.pos[p] - graph.pos[node]
         la, lb = np.linalg.norm(a), np.linalg.norm(bvec)

@@ -24,16 +24,20 @@ from bpy.props import (
 )
 from bpy.types import PropertyGroup
 
-from ..core.params import DEFAULT_PRESET_ID, PARAM_SPECS, PRESETS, PRESETS_BY_ID, Params
+from ..core.params import DEFAULT_PRESET_ID, PARAM_SPECS, PRESETS, PRESETS_BY_ID, SPECS_BY_NAME, Params
 
 
 def apply_preset(settings, preset_id: str) -> None:
     for name, value in PRESETS_BY_ID[preset_id].params().as_dict().items():
-        setattr(settings, name, value)
+        setattr(settings, name, bool(value) if SPECS_BY_NAME[name].unit == "bool" else value)
 
 
 def settings_to_params(settings) -> Params:
-    return Params().with_values({spec.name: getattr(settings, spec.name) for spec in PARAM_SPECS})
+    values = {}
+    for spec in PARAM_SPECS:
+        value = getattr(settings, spec.name)
+        values[spec.name] = int(value) if spec.unit == "bool" else value
+    return Params().with_values(values)
 
 
 def _on_preset_changed(self, _context):
@@ -53,6 +57,8 @@ def _on_heatmap_toggled(self, context):
 
 
 def _param_property(spec):
+    if spec.unit == "bool":
+        return BoolProperty(name=spec.label, description=spec.description, default=bool(spec.default))
     description = f"{spec.description} ({spec.unit})" if spec.unit else spec.description
     if spec.is_int:
         return IntProperty(
@@ -128,6 +134,7 @@ class HC_SupportSet(PropertyGroup):
     params_json: StringProperty(description="Parameters used for the last generation (mm)")
     tip_count: IntProperty()
     tree_count: IntProperty()
+    landing_count: IntProperty()
     unreachable_count: IntProperty()
     seconds: FloatProperty()
     unreachable_json: StringProperty(description="Contacts that could not reach the bed (mm)")
@@ -151,8 +158,10 @@ class HC_SupportSet(PropertyGroup):
         self.checked = True
 
     def counts(self) -> tuple[int, int]:
+        """(errors, warnings); INFO findings such as landings are not counted."""
         errors = sum(1 for f in self.findings if f.severity == "ERROR")
-        return errors, len(self.findings) - errors
+        warnings = sum(1 for f in self.findings if f.severity == "WARNING")
+        return errors, warnings
 
     def target_objects(self) -> list:
         return [t.obj for t in self.targets if t.obj is not None]

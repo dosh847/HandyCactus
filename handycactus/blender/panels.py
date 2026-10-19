@@ -24,7 +24,7 @@ from .props import is_support, settings_to_params
 # Bigger than any miniature: probably a units mismatch.
 LARGE_MODEL_MM = 500.0
 
-UNIT_SUFFIX = {"mm": "mm", "deg": "°", "mm/mm": "mm/mm", "x": "×", "": ""}
+UNIT_SUFFIX = {"mm": "mm", "deg": "°", "mm/mm": "mm/mm", "x": "×", "bool": "", "": ""}
 
 
 class _HCPanel:
@@ -78,6 +78,8 @@ class HANDYCACTUS_PT_main(_HCPanel, Panel):
             info = active.handycactus_set
             box.label(text=f"{active.name}", icon="MOD_SKIN")
             box.label(text=f"{info.tip_count} tips, {info.tree_count} trees ({info.seconds:.2f} s)")
+            if info.landing_count:
+                box.label(text=f"{info.landing_count} branch(es) land on the model", icon="INFO")
             if info.unreachable_count:
                 box.label(text=f"{info.unreachable_count} contact(s) unreachable", icon="ERROR")
             box.label(text="Targets: " + ", ".join(ob.name for ob in info.target_objects()))
@@ -93,7 +95,7 @@ def _draw_checks(layout, info) -> None:
     if not info.checked:
         return
     errors, warnings = info.counts()
-    if not errors and not warnings:
+    if not len(info.findings):
         layout.label(text="All checks passed", icon="CHECKMARK")
         return
     layout.label(text=f"{errors} error(s), {warnings} warning(s)", icon="ERROR" if errors else "INFO")
@@ -105,7 +107,8 @@ class HANDYCACTUS_UL_findings(UIList):
     """Check findings of a support set: errors first, then warnings."""
 
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        layout.label(text=item.message, icon="CANCEL" if item.severity == "ERROR" else "ERROR")
+        icon = {"ERROR": "CANCEL", "WARNING": "ERROR"}.get(item.severity, "INFO")
+        layout.label(text=item.message, icon=icon)
 
 
 def _make_group_panel(group_id: str, group_label: str) -> type:

@@ -133,6 +133,7 @@ def test_unreachable_contacts_are_marked(scene):
     plate = add_box(12, (0, 0, 0.5), "plate", scale=(1, 1, 1 / 12))  # 12 x 12 x 1, on the bed
     post = add_box(2, (0, 0, 3.5), "post", scale=(1, 1, 2.5))  # z 1..6
     canopy = add_box(8, (0, 0, 6.5), "canopy", scale=(1, 1, 1 / 8))  # z 6..7, over the plate
+    scene.handycactus.land_on_model = False
     select_only(plate, post, canopy)
     bpy.ops.handycactus.generate()
     (support,) = supports_in_scene()
@@ -178,6 +179,7 @@ def test_check_and_frame_unreachable_findings(scene):
     plate = add_box(12, (0, 0, 0.5), "plate", scale=(1, 1, 1 / 12))
     post = add_box(2, (0, 0, 3.5), "post", scale=(1, 1, 2.5))
     canopy = add_box(8, (0, 0, 6.5), "canopy", scale=(1, 1, 1 / 8))
+    scene.handycactus.land_on_model = False
     select_only(plate, post, canopy)
     bpy.ops.handycactus.generate()
     (support,) = supports_in_scene()
@@ -195,3 +197,24 @@ def test_check_and_frame_unreachable_findings(scene):
     select_only(support)
     bpy.ops.handycactus.clear_supports()
     assert overlay.state.markers is None
+
+
+def test_trapped_branches_land_on_the_model(scene):
+    plate = add_box(12, (0, 0, 0.5), "plate", scale=(1, 1, 1 / 12))
+    post = add_box(2, (0, 0, 3.5), "post", scale=(1, 1, 2.5))
+    canopy = add_box(8, (0, 0, 6.5), "canopy", scale=(1, 1, 1 / 8))
+    select_only(plate, post, canopy)
+    bpy.ops.handycactus.generate()
+    (support,) = supports_in_scene()
+    info = support.handycactus_set
+    assert info.unreachable_count == 0
+    assert info.landing_count > 0
+    landings = [f for f in info.findings if f.code == "landing"]
+    assert len(landings) == info.landing_count and all(f.severity == "INFO" for f in landings)
+    assert info.counts() == (0, 0)
+    g = pipeline.read_support_graph(bpy.context, support)
+    assert g.problems() == []
+    # The plate covers the bed under the canopy: every branch lands on the plate's top (z = 1),
+    # its tip sunk `penetration` into it.
+    v = evaluated_verts(support)
+    assert v[:, 2].min() == pytest.approx(1.0 - Params().penetration, abs=0.05)

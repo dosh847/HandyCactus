@@ -9,11 +9,6 @@ from mathutils.bvhtree import BVHTree
 
 from ..core.spatial import PARITY_DIRECTIONS
 
-# Below this |cos| between (point - nearest) and the face normal, the nearest
-# point is probably on an edge or vertex and its face normal can mislead.
-GRAZING_COS = 0.3
-_STEP = 1e-6  # Blender units, step past a hit before casting again
-
 
 class BVHInsideTester:
     """Inside test in the BVH's own space; `to_local` maps query points (world mm) into it.
@@ -55,26 +50,28 @@ class BVHInsideTester:
         return out
 
     def _inside(self, p: Vector) -> bool:
-        location, normal, _index, distance = self.bvh.find_nearest(p)
-        if location is None:
-            return False
-        if distance > 1e-12:
-            cos = (p - location).dot(normal) / distance
-            if abs(cos) >= GRAZING_COS:
-                return cos < 0
-        votes = sum(self._odd_crossings(p, d) for d in self._directions)
+        # Ray winding number: along a ray, surface exits minus entries is positive inside
+        # (majority of 3 rays). Works for overlapping shells, where parity does not.
+        votes = sum(self._winding(p, d) > 0 for d in self._directions)
         return votes >= 2
 
-    def _odd_crossings(self, origin: Vector, direction: Vector) -> bool:
-        crossings = 0
+    def _winding(self, origin: Vector, direction: Vector) -> int:
+        winding = 0
         o = origin.copy()
-        for _ in range(10_000):
-            hit, _n, _i, _d = self.bvh.ray_cast(o, direction)
+        last = -1
+        for _ in range(MAX_CROSSINGS):
+            hit, normal, index, _d = self.bvh.ray_cast(o, direction)
             if hit is None:
                 break
-            crossings += 1
+            if index != last:  # float32 BVH: stepping off a hit can land on the same face
+                winding += 1 if normal.dot(direction) > 0 else -1
+                last = index
             o = hit + direction * _STEP
-        return crossings % 2 == 1
+        return winding
+
+
+_STEP = 1e-4  # Blender units to step past a hit before casting again (float32-safe)
+MAX_CROSSINGS = 1000
 
 
 def world_bvh(obj, depsgraph, scale_mm: float) -> BVHTree:
@@ -108,13 +105,18 @@ class BVHObstacles:
         return out
 
     def ray_distance(self, origins: np.ndarray, directions: np.ndarray, max_distance: float) -> np.ndarray:
+        return self.ray_hit(origins, directions, max_distance)[0]
+
+    def ray_hit(self, origins, directions, max_distance):
         origins = np.asarray(origins, dtype=np.float64).reshape(-1, 3)
         directions = np.asarray(directions, dtype=np.float64).reshape(-1, 3)
         out = np.full(len(origins), np.inf)
+        normals = np.zeros((len(origins), 3))
         for i, (o, d) in enumerate(zip(origins.tolist(), directions.tolist(), strict=True)):
             vo, vd = Vector(o), Vector(d)
             for tree in self.trees:
                 hit = tree.ray_cast(vo, vd, max_distance)
                 if hit[0] is not None and hit[3] < out[i]:
                     out[i] = hit[3]
-        return out
+                    normals[i] = hit[1].normalized()
+        return out, normals

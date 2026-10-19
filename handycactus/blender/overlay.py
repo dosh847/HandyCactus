@@ -30,6 +30,8 @@ ISLAND_COLOR = (0.1, 0.7, 1.0, 1.0)
 BLOCKED_COLOR = (0.55, 0.55, 0.55, 1.0)
 ERROR_COLOR = (1.0, 0.1, 0.1, 1.0)
 WARNING_COLOR = (1.0, 0.55, 0.0, 1.0)
+INFO_COLOR = (0.2, 0.75, 1.0, 1.0)
+SEVERITY_COLORS = {"ERROR": ERROR_COLOR, "WARNING": WARNING_COLOR, "INFO": INFO_COLOR}
 
 
 @dataclass
@@ -69,9 +71,7 @@ def set_findings(findings) -> None:
     findings = list(findings or [])
     if findings:
         state.markers = np.array([tuple(f.location) for f in findings], dtype=np.float64).reshape(-1, 3)
-        state.marker_colors = np.array(
-            [ERROR_COLOR if f.severity == "ERROR" else WARNING_COLOR for f in findings]
-        )
+        state.marker_colors = np.array([SEVERITY_COLORS[f.severity] for f in findings])
         _ensure_running()
     else:
         state.markers = state.marker_colors = None
@@ -179,7 +179,13 @@ def _rebuild() -> None:
         mesh = state.mesh
         same_set = preview is not None and preview.names == [ob.name for ob in objects]
         contacts = preview.result.contacts.positions if same_set else None
-        h = heatmap.build(mesh, settings_to_params(scene.handycactus), contacts)
+        # With a preview of this set, use detection's face mask (it leaves out buried faces).
+        mask = (
+            preview.result.support_faces
+            if same_set and len(preview.result.support_faces) == len(mesh.tris)
+            else None
+        )
+        h = heatmap.build(mesh, settings_to_params(scene.handycactus), contacts, mask)
         state.heat_positions = h.positions / scale
         state.heat_colors = h.colors
         state.face_count, state.gap_face_count = h.face_count, h.gap_face_count

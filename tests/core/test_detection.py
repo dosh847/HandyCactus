@@ -219,3 +219,20 @@ def test_sloped_plate_is_not_bridged_by_its_own_lower_edge():
     v = box.verts @ rot.T + [0, 0, 8]
     _, r = run(TargetMesh("plate", v, box.tris))
     assert r.stats["samples_after_bridging"] == r.stats["samples"]
+
+
+def test_surfaces_buried_in_another_shell_of_the_same_target_get_no_contacts():
+    # One object made of two overlapping shells (as many sculpts are): a body, and an arm
+    # whose underside runs inside the body for x < 10.
+    from handycactus.core.mesh_data import TargetMesh
+
+    body = voxels([((0, 0, 0), (10, 4, 10))])
+    arm = voxels([((6, 0, 5), (20, 4, 8))])
+    joined = TargetMesh(
+        "joined", np.vstack([body.verts, arm.verts]), np.vstack([body.tris, arm.tris + len(body.verts)])
+    )
+    mesh = combine([joined])
+    r = det.detect(mesh, Params(), [NumpyInsideTester(joined.verts, joined.tris)])
+    x = r.contacts.positions[:, 0]
+    assert len(x) > 0
+    assert x.min() > 10.0 - 1e-6  # nothing on the buried part of the arm

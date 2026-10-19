@@ -31,11 +31,17 @@ class Heatmap:
     gap_face_count: int
 
 
-def build(mesh: MeshData, params: Params, contacts: np.ndarray | None = None) -> Heatmap:
-    """`contacts` (K, 3) mm turns on coverage-gap colouring."""
-    overhang = needs_support(mesh.face_normals, params.overhang_angle) & (mesh.face_areas > 0)
-    forced = mesh.force_weights[mesh.tris].mean(axis=1) > PAINT_THRESHOLD if len(mesh.tris) else overhang
-    faces = np.flatnonzero((overhang | forced) & (mesh.face_min_z >= params.bed_ignore_height))
+def build(
+    mesh: MeshData,
+    params: Params,
+    contacts: np.ndarray | None = None,
+    support_faces: np.ndarray | None = None,
+) -> Heatmap:
+    """`contacts` (K, 3) mm turns on coverage-gap colouring. `support_faces` (a detection
+    result's mask) replaces the angle-only estimate, e.g. leaving out buried faces."""
+    if support_faces is None:
+        support_faces = estimate_support_faces(mesh, params)
+    faces = np.flatnonzero(support_faces)
 
     t = np.clip(overhang_severity(mesh.face_normals[faces], params.overhang_angle), 0.0, 1.0)
     colors = LOW + (HIGH - LOW) * t[:, None]
@@ -53,6 +59,14 @@ def build(mesh: MeshData, params: Params, contacts: np.ndarray | None = None) ->
         face_count=len(faces),
         gap_face_count=gaps,
     )
+
+
+def estimate_support_faces(mesh: MeshData, params: Params) -> np.ndarray:
+    """Faces that need support by overhang angle (and HC_Force paint) alone. numpy only:
+    unlike detection it cannot see buried faces."""
+    overhang = needs_support(mesh.face_normals, params.overhang_angle) & (mesh.face_areas > 0)
+    forced = mesh.force_weights[mesh.tris].mean(axis=1) > PAINT_THRESHOLD if len(mesh.tris) else overhang
+    return (overhang | forced) & (mesh.face_min_z >= params.bed_ignore_height)
 
 
 def within(points: np.ndarray, targets: np.ndarray, radius: float) -> np.ndarray:
