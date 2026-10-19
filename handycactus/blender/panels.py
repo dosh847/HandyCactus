@@ -4,15 +4,17 @@
 from __future__ import annotations
 
 import bpy
-from bpy.types import Panel
+from bpy.types import Panel, UIList
 
 from ..core.params import GROUPS, PARAM_SPECS
 from . import overlay
 from .mesh_io import set_size_mm
 from .operators import (
     HANDYCACTUS_OT_apply_preset,
+    HANDYCACTUS_OT_check_supports,
     HANDYCACTUS_OT_clear_preview,
     HANDYCACTUS_OT_clear_supports,
+    HANDYCACTUS_OT_frame_finding,
     HANDYCACTUS_OT_generate,
     HANDYCACTUS_OT_place_on_bed,
     HANDYCACTUS_OT_preview_contacts,
@@ -79,9 +81,31 @@ class HANDYCACTUS_PT_main(_HCPanel, Panel):
             if info.unreachable_count:
                 box.label(text=f"{info.unreachable_count} contact(s) unreachable", icon="ERROR")
             box.label(text="Targets: " + ", ".join(ob.name for ob in info.target_objects()))
+            _draw_checks(box, info)
 
         for problem in settings_to_params(settings).problems():
             layout.label(text=problem, icon="ERROR")
+
+
+def _draw_checks(layout, info) -> None:
+    row = layout.row(align=True)
+    row.operator(HANDYCACTUS_OT_check_supports.bl_idname, icon="CHECKMARK")
+    if not info.checked:
+        return
+    errors, warnings = info.counts()
+    if not errors and not warnings:
+        layout.label(text="All checks passed", icon="CHECKMARK")
+        return
+    layout.label(text=f"{errors} error(s), {warnings} warning(s)", icon="ERROR" if errors else "INFO")
+    layout.template_list("HANDYCACTUS_UL_findings", "", info, "findings", info, "findings_index", rows=4)
+    layout.operator(HANDYCACTUS_OT_frame_finding.bl_idname, icon="VIEWZOOM")
+
+
+class HANDYCACTUS_UL_findings(UIList):
+    """Check findings of a support set: errors first, then warnings."""
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        layout.label(text=item.message, icon="CANCEL" if item.severity == "ERROR" else "ERROR")
 
 
 def _make_group_panel(group_id: str, group_label: str) -> type:
@@ -110,7 +134,11 @@ def _make_group_panel(group_id: str, group_label: str) -> type:
     )
 
 
-classes = (HANDYCACTUS_PT_main, *(_make_group_panel(gid, label) for gid, label in GROUPS))
+classes = (
+    HANDYCACTUS_UL_findings,
+    HANDYCACTUS_PT_main,
+    *(_make_group_panel(gid, label) for gid, label in GROUPS),
+)
 
 
 def register():

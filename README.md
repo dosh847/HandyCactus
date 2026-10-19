@@ -13,7 +13,7 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Status
 
-**M2: support generation.** The **HandyCactus** tab in the 3D viewport
+**M3: printability checks.** The **HandyCactus** tab in the 3D viewport
 sidebar (N panel) has presets, every parameter and a **Units** setting
 (default: 1 Blender unit = 1 mm, which is how STLs import). Also in the tab:
 
@@ -29,12 +29,16 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
   it again to rebuild the set in place. Red dots mark contacts that could
   not reach the bed.
 - **Clear Supports**: deletes the selected support sets.
+- **Check Supports**: printability checks (also run after every Generate).
+  They flag unreachable contacts, coverage gaps, thin or steep branches,
+  branches hitting the model, slender trunks and tiny feet. Findings are
+  listed in the panel and marked in the viewport (red errors, orange
+  warnings). **Frame Finding** jumps to one.
 
 Paint a vertex group named `HC_Force` to force supports on an area, or
 `HC_Block` to keep them off it.
 
-Next: printability checks (M3), then manual editing (M4) and 3MF/STL export
-(M5).
+Next: manual editing (M4), then 3MF/STL export (M5).
 
 ## Layout
 
@@ -69,7 +73,7 @@ pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.3.0.zip
+python tools/extension.py install-check dist/handycactus-0.4.0.zip
 ```
 
 ### Installing for development

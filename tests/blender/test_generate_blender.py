@@ -137,7 +137,7 @@ def test_unreachable_contacts_are_marked(scene):
     bpy.ops.handycactus.generate()
     (support,) = supports_in_scene()
     assert support.handycactus_set.unreachable_count > 0
-    assert overlay.state.unreachable is not None and len(overlay.state.unreachable) > 0
+    assert overlay.state.markers is not None and len(overlay.state.markers) > 0
 
 
 def test_generate_refuses_below_the_bed(scene):
@@ -161,3 +161,36 @@ def test_graph_round_trip(scene):
     for field in ("kind", "parent", "tree", "tip", "target", "locked", "flags"):
         assert np.array_equal(getattr(back, field), getattr(g, field)), field
     assert back.problems() == []
+
+
+def test_generate_runs_checks_and_shows_markers(scene):
+    box = add_box(8, (0, 0, 14), "box")
+    select_only(box)
+    bpy.ops.handycactus.generate()
+    (support,) = supports_in_scene()
+    info = support.handycactus_set
+    assert info.checked
+    errors, _ = info.counts()
+    assert errors == 0, [f.message for f in info.findings]
+
+
+def test_check_and_frame_unreachable_findings(scene):
+    plate = add_box(12, (0, 0, 0.5), "plate", scale=(1, 1, 1 / 12))
+    post = add_box(2, (0, 0, 3.5), "post", scale=(1, 1, 2.5))
+    canopy = add_box(8, (0, 0, 6.5), "canopy", scale=(1, 1, 1 / 8))
+    select_only(plate, post, canopy)
+    bpy.ops.handycactus.generate()
+    (support,) = supports_in_scene()
+    select_only(support)
+    assert bpy.ops.handycactus.check_supports() == {"FINISHED"}
+    info = support.handycactus_set
+    unreachable = [f for f in info.findings if f.code == "unreachable"]
+    assert len(unreachable) == info.unreachable_count > 0
+    assert overlay.state.markers is not None and len(overlay.state.markers) == len(info.findings)
+    # Errors are listed first; framing one puts the cursor on it.
+    assert info.findings[0].severity == "ERROR"
+    assert bpy.ops.handycactus.frame_finding(index=0) == {"FINISHED"}
+    assert tuple(bpy.context.scene.cursor.location) == pytest.approx(tuple(info.findings[0].location), abs=1e-4)
+    select_only(support)
+    bpy.ops.handycactus.clear_supports()
+    assert overlay.state.markers is None

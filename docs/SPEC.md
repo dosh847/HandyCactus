@@ -190,9 +190,10 @@ Locked trees are loaded first and are never changed by the pipeline.
   hit, taking the minimum over targets), so every target is an obstacle for
   every other target's tips and branches.
 - **Preview Contacts** needs only the inside test. It builds an object-space
-  BVH (`BVHTree.FromObject`) only for targets whose bounds overlap
-  another's, and maps query points into object space (inside/outside is
-  unchanged by an affine map).
+  BVH (`BVHTree.FromObject`) for every closed target and maps query points
+  into object space (inside/outside is unchanged by an affine map). Every
+  target needs one, not just overlapping ones, because the bridging test
+  (§6.2 step 3) asks about a target's own material.
 - **Overlapping parts**: multi-part minis often intersect (an arm pushed into
   the body). Any face, sample or contact that lies **inside another target**
   is discarded, because it will never print as a surface. "Inside" is decided
@@ -235,16 +236,36 @@ point is inside the other part.
 
    Forced contacts are never dropped by the bridging step. Minima win over
    patch-lowest points when deduplicating.
-3. **Bridging**: drop a sample when its 3D distance to the nearest
-   *supported boundary* of its own patch is ≤ `max_bridge / 2` (default
-   `max_bridge` = 2 mm). A supported boundary is a patch boundary edge whose
-   neighbouring face **continues downward**: that face's third vertex is
-   below the edge. Neighbours resting on the bed, or buried inside another
-   target, also count.
+3. **Bridging** (revised in M3): a sample is dropped as bridgeable only
+   when it is held from **two sides**.
+   - Just below it there must be model material in two directions at least
+     120° apart (12 azimuth bins, 4 bins apart).
+   - The nearest such material on the two sides must be no more than
+     `max_bridge` apart in total (default 2 mm), left gap plus right gap.
+   - Material is probed by the inside test at `0.4 × max_bridge` below the
+     sample (0.8 mm) **and** at half that depth (0.4 mm), on rings out to
+     `max_bridge`. So bumps shallower than that, and a separate part across
+     an air gap, do not anchor. Deep probes are tested first; shallow ones
+     only where the deep ones found material.
+   - The bed never anchors. Open targets have no inside test, so they never
+     anchor, which errs toward more supports. `HC_Force` samples are never
+     dropped.
 
-   A neighbour that goes *up* does not count. The vertical side wall of a
-   cantilever's underside hangs in the air itself, so it supports nothing.
-   This is a v1 heuristic and needs testing against real minis.
+   Material on one side only is the overhang's own sloped continuation, or
+   a wall the overhang cantilevers from. The overhang angle already decides
+   those, so a cantilever gets contacts right up to its root. Each patch's
+   lowest point uses the same test.
+
+   **Why it changed.** The M1 rule counted a patch edge as supported when
+   the neighbouring triangle sloped down. On a sculpted 42 mm mini (field
+   test, M2) that dropped about 90% of samples: every bump on a sculpt
+   slopes down, so nearly every sample was within 1 mm of a "supported"
+   edge. The result was 189 contacts (177 of them islands) with most of the
+   overhang uncovered. On the synthetic organic test model the rule went
+   from 61% of overhang faces uncovered to 5%.
+
+   `DetectionResult.stats` records counts after each stage (samples, after
+   bridging, after the inside filter) for diagnosing cases like this.
 4. **Paint masks**: vertex group `HC_Force` (weight > 0.5) forces sampling
    at the patch spacing even below the overhang threshold. `HC_Block`
    (weight > 0.5) removes all contacts, including islands, and the check
@@ -267,7 +288,14 @@ For each contact `p` with surface normal `n`:
     plus straight down, ordered by closeness to `n`. The ring is only
     evaluated when the preferred axis fails, which keeps tips at about
     0.3 s for 400 contacts.
-  - If those fail, shorten the tip down to `min_tip_length`.
+  - If those fail, shorten the tip down to `min_tip_length`, then try
+    longer tips (1.5× and 2× `tip_length`) to reach out of crevices.
+  - **Branch room (M3).** The knuckle must leave room for its branch:
+    `min_radius + model_clearance` of air if possible, otherwise at least
+    `min_radius + 0.4 mm` (`BRANCH_HARD_CLEARANCE`). Each pass tries every
+    axis and length. Before this rule, knuckles tucked into crevices were
+    accepted, and their branches were stuck on the first move. That was
+    all 82 stuck branches on the organic test model.
   - If that fails, mark the contact *unreachable* (reported by checks, not
     built).
 - The knuckle must not overlap another knuckle. When two do, the lower tip
@@ -320,16 +348,24 @@ the same output.
   (default 0.4 mm) to `foot_height`. A head wakes when the level passes it,
   and every awake head then moves down to the level, so heads meet at equal
   heights.
-- **Where a head goes.** A head moves toward the nearest head within
-  `merge_distance` that is at or below its own height. If that head is also
-  awake, both aim for the midpoint. With no partner, the head goes straight
-  down, unless a downward ray hits the model within 30 mm. Then it heads
-  for whichever of 16 cone-rim directions runs free the longest.
-- **Clearance.** A move is accepted if it keeps `radius + model_clearance`
-  from the model, or at least does not get closer than before (knuckles
-  start nearer than that). Otherwise the best of 33 cone candidates is
-  used: the rim, the half-rim and straight down. With no candidate, the
-  head is stuck.
+- **Where a head goes.** A head with the model straight below it is
+  *blocked* (revised in M3).
+  - A blocked head follows a straight free path to the bed found inside its
+    cone. The search runs most vertical first: straight down, then rings at
+    ¼, ½, ¾ and all of `max_branch_angle`, 16 directions each. The head
+    keeps that path while it stays free; with no free path, it takes the
+    direction that runs free the longest.
+  - Blocked heads neither seek merge partners nor accept them, so a free
+    branch is never pulled under the model.
+  - A free head moves toward the nearest free head within `merge_distance`
+    that is at or below its own height. If that head is also awake, both
+    aim for the midpoint. With no partner, it goes straight down.
+- **Clearance.** Branches aim for `radius + model_clearance` from the model.
+  A move is accepted if it keeps that, or does not lose any of it. Otherwise
+  the best of 33 cone candidates is used (the rim, the half-rim and
+  straight down). Failing that, a candidate keeping at least
+  `radius + 0.4 mm` (the hard minimum) is used, the one with the most room
+  first. With no such candidate, the head is stuck.
 - **Merging.** Heads within `max(r) + 0.3 mm` merge, but only when every
   member can reach the junction from its previous node inside its cone, so
   no branch ever exceeds `max_branch_angle`. Heads that aren't there yet
@@ -457,19 +493,31 @@ own presets through the standard Blender preset menu (`AddPresetBase`).
 
 ## 10. Printability checks
 
-**Check Supports** writes a result list (UIList). Clicking a row selects the
-problem and frames the view on it.
+**As built in M3** (`core/checks.py`):
+- The checks run automatically at the end of **Generate**, and again on
+  demand with **Check Supports**.
+- Findings are stored on the supports object (`HC_SupportSet.findings`) and
+  listed in the panel, errors first.
+- **Frame Finding** puts the 3D cursor on the selected finding and centres
+  the view on it.
+- Every finding is drawn as a viewport marker: red for errors, orange for
+  warnings.
+- Findings are grouped so a bad setting does not produce thousands of rows:
+  one per tree for thin, steep, collision and slender, and one per
+  connected gap region for coverage.
+- Generate also records the unreachable contacts on the supports object
+  (`unreachable_json`), so Check Supports can report them later.
 
 | Check | Rule | Severity |
 |---|---|---|
 | Graph validity | Forest invariant (§5.2), every tree has exactly one foot at Z = 0 | Error |
 | Unsupported contacts | Contacts marked unreachable or blocked (including blocked islands) | Error |
-| Coverage gaps | Faces that need support and are farther than `1.5 × tip_spacing` from any contact | Warning |
+| Coverage gaps | Connected regions of overhang faces farther than `1.5 × tip_spacing` from any contact, reported when at least `tip_spacing²` in area | Warning |
 | Too thin | Segment diameter < `2 × nozzle_diameter` (tips excluded); contact diameter < `nozzle_diameter × 0.75` | Warning |
 | Too steep | Segment angle from vertical > `max_branch_angle + 5°` (catches manual edits) | Warning |
-| Model collision | Non-tip segment closer than `0.5 × model_clearance` to the model | Error |
+| Model collision | Non-tip segment, sampled every 0.5 mm, with less than `min(0.5 × model_clearance, 0.4 mm) − 0.05 mm` of air to the model | Error |
 | Slenderness | Trunk height / mean diameter > 40 (wobble risk) | Warning |
-| Floating start | First-layer footprint of a foot < `π × nozzle²` | Warning |
+| Floating start | Foot radius < nozzle diameter (footprint < `π × nozzle²`) | Warning |
 
 The checks are also exposed as a function, so the CI tests and a future
 slicer-based layer check (v2) can reuse them.
@@ -556,6 +604,17 @@ Reference machine: a 2023 mid-range laptop CPU.
 | Incremental add-tip | < 150 ms |
 | Generate end to end, typical 42 mm mini (~500k tris over 1–5 parts, ~600 tips) | < 4 s |
 
+**Measured at M3** on the synthetic organic model: a 125k-triangle sculpted
+body with layered feather wings, tilted 45°, about 62 mm wide.
+
+| | Before M3 | After M3 |
+|---|---|---|
+| Overhang faces uncovered | 61% | 5% |
+| Contacts (islands) | 109 (82) | ~470 (~360) |
+| Contacts unreachable | 18% | 11% |
+| Generate | — | 4.1 s |
+| Check Supports alone | — | 0.17 s |
+
 **Measured at M2**: Generate on a three-part set (500k-triangle body, an arm
 sphere and a box), about 420 tips and 113 trees:
 - cold: 3.6–4.9 s;
@@ -617,7 +676,15 @@ None. All six were resolved on 2026-10-19:
 6. **Blender version**: the latest stable release (5.2 LTS today), tracked
    forward (§12).
 
-New questions found during implementation go here.
+New questions found during implementation go here:
+
+7. **Contacts in sub-1 mm crevices** (M3, open). On layered sculpts
+   (feathers, scales, cloth folds), some contacts sit in gaps too narrow
+   for any branch to leave: under 1 mm between two parts of the model.
+   With build-plate-only routing they stay unreachable. That was about 11%
+   of contacts on the organic test model, reported as errors with markers.
+   Supporting them needs **landing on the model** (currently v2), or
+   accepting them as unsupported and fixing by hand (M4).
 
 ## 15. Milestones
 

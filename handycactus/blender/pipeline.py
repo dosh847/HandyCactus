@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 
@@ -10,7 +11,7 @@ import bpy
 import numpy as np
 from mathutils import Matrix
 
-from ..core import detection, routing, tips
+from ..core import checks, detection, routing, tips
 from ..core.graph import CONTACT, FOOT
 from ..core.mesh_data import MeshData, combine
 from . import gn_builder, graph_io
@@ -166,6 +167,9 @@ def generate(context, objects, support=None) -> GenerateResult:
     info.tip_count = int((graph.kind == CONTACT).sum())
     info.tree_count = int((graph.kind == FOOT).sum())
     info.unreachable_count = len(routed.unreachable_tips)
+    unreachable = built.surface[routed.unreachable_tips]
+    info.unreachable_json = json.dumps(np.round(unreachable, 4).tolist())
+    info.set_findings(checks.run_checks(graph, params, mesh, obstacles, unreachable))
     info.seconds = time.perf_counter() - start
     return GenerateResult(
         support=support,
@@ -191,6 +195,21 @@ def remove_support(support) -> None:
     bpy.data.objects.remove(support, do_unlink=True)
     if mesh is not None and mesh.users == 0:
         bpy.data.meshes.remove(mesh)
+
+
+def check_support(context, support) -> list:
+    """Re-run the printability checks on an existing support set against its targets."""
+    info = support.handycactus_set
+    objects = info.target_objects()
+    scale = scene_mm_per_bu(context.scene)
+    params = info.params() or settings_to_params(context.scene.handycactus)
+    graph = read_support_graph(context, support)
+    mesh = read_set(context, objects) if objects else None
+    depsgraph = context.evaluated_depsgraph_get()
+    obstacles = BVHObstacles([world_bvh(ob, depsgraph, scale) for ob in objects]) if objects else None
+    findings = checks.run_checks(graph, params, mesh, obstacles, info.unreachable_points())
+    info.set_findings(findings)
+    return findings
 
 
 def read_support_graph(context, support):

@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import bpy
 from bpy.types import Operator
+from mathutils import Vector
 
 from ..core.detection import TooManyContacts
 from . import overlay, pipeline
-from .mesh_io import BLOCK_GROUP, mesh_targets
+from .mesh_io import BLOCK_GROUP, mesh_targets, scene_mm_per_bu
 from .props import apply_preset, is_support, settings_to_params
 
 
@@ -128,12 +129,14 @@ class HANDYCACTUS_OT_generate(Operator):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         overlay.clear_preview()
-        overlay.set_unreachable(result.unreachable_points)
+        info = result.support.handycactus_set
+        overlay.set_findings(info.findings)
+        errors, warnings = info.counts()
         msg = f"{result.tips} tips on {result.trees} trees in {result.seconds:.2f} s"
         if result.unreachable:
-            self.report({"WARNING"}, f"{msg}; {result.unreachable} contact(s) could not reach the bed (red)")
-        else:
-            self.report({"INFO"}, msg)
+            msg += f"; {result.unreachable} contact(s) could not reach the bed"
+        msg += f"; checks: {errors} error(s), {warnings} warning(s)"
+        self.report({"WARNING"} if errors else {"INFO"}, msg)
         return {"FINISHED"}
 
 
@@ -161,8 +164,62 @@ class HANDYCACTUS_OT_clear_supports(Operator):
         supports = selected_supports(context)
         for ob in supports:
             pipeline.remove_support(ob)
-        overlay.set_unreachable(None)
+        overlay.set_findings(None)
         self.report({"INFO"}, f"Removed {len(supports)} support set(s)")
+        return {"FINISHED"}
+
+
+class HANDYCACTUS_OT_check_supports(Operator):
+    """Run the printability checks on the selected support set"""
+
+    bl_idname = "handycactus.check_supports"
+    bl_label = "Check Supports"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(selected_supports(context))
+
+    def execute(self, context):
+        support = selected_supports(context)[0]
+        pipeline.check_support(context, support)
+        info = support.handycactus_set
+        overlay.set_findings(info.findings)
+        errors, warnings = info.counts()
+        self.report({"WARNING"} if errors else {"INFO"}, f"{errors} error(s), {warnings} warning(s)")
+        return {"FINISHED"}
+
+
+class HANDYCACTUS_OT_frame_finding(Operator):
+    """Put the 3D cursor on a check finding and centre the view on it"""
+
+    bl_idname = "handycactus.frame_finding"
+    bl_label = "Frame Finding"
+    bl_options = {"REGISTER"}
+
+    index: bpy.props.IntProperty(default=-1, options={"SKIP_SAVE"})
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            bool(selected_supports(context))
+            and len(selected_supports(context)[0].handycactus_set.findings) > 0
+        )
+
+    def execute(self, context):
+        info = selected_supports(context)[0].handycactus_set
+        index = self.index if self.index >= 0 else info.findings_index
+        if not 0 <= index < len(info.findings):
+            return {"CANCELLED"}
+        info.findings_index = index
+        finding = info.findings[index]
+        location = Vector(finding.location) / scene_mm_per_bu(context.scene)
+        context.scene.cursor.location = location
+        region_3d = getattr(context.space_data, "region_3d", None) if context.space_data else None
+        if region_3d is not None:
+            region_3d.view_location = location
+            region_3d.view_distance = 25.0 / scene_mm_per_bu(context.scene)  # about a 25 mm view
+        self.report({"INFO"}, finding.message)
         return {"FINISHED"}
 
 
@@ -170,6 +227,8 @@ classes = (
     HANDYCACTUS_OT_apply_preset,
     HANDYCACTUS_OT_generate,
     HANDYCACTUS_OT_clear_supports,
+    HANDYCACTUS_OT_check_supports,
+    HANDYCACTUS_OT_frame_finding,
     HANDYCACTUS_OT_preview_contacts,
     HANDYCACTUS_OT_clear_preview,
     HANDYCACTUS_OT_place_on_bed,

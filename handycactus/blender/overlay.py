@@ -28,7 +28,8 @@ POINT_SIZE = 6.0
 SAMPLE_COLOR = (0.2, 0.9, 0.3, 1.0)
 ISLAND_COLOR = (0.1, 0.7, 1.0, 1.0)
 BLOCKED_COLOR = (0.55, 0.55, 0.55, 1.0)
-UNREACHABLE_COLOR = (1.0, 0.1, 0.1, 1.0)
+ERROR_COLOR = (1.0, 0.1, 0.1, 1.0)
+WARNING_COLOR = (1.0, 0.55, 0.0, 1.0)
 
 
 @dataclass
@@ -42,7 +43,8 @@ class _State:
     heat_positions: np.ndarray | None = None  # Blender units
     heat_colors: np.ndarray | None = None
     point_positions: np.ndarray | None = None
-    unreachable: np.ndarray | None = None  # (U, 3) mm, from the last Generate
+    markers: np.ndarray | None = None  # (M, 3) mm: check findings of the shown support set
+    marker_colors: np.ndarray | None = None
     point_colors: np.ndarray | None = None
     batches: dict = field(default_factory=dict)
     batches_stale: bool = True
@@ -62,11 +64,17 @@ def set_preview(run) -> None:
     _rebuild()
 
 
-def set_unreachable(points_mm) -> None:
-    """Red markers for contacts the last Generate could not support (None clears)."""
-    state.unreachable = None if points_mm is None else np.asarray(points_mm, dtype=np.float64).reshape(-1, 3)
-    if state.unreachable is not None and len(state.unreachable):
+def set_findings(findings) -> None:
+    """Markers for check findings (red errors, orange warnings); an empty list clears them."""
+    findings = list(findings or [])
+    if findings:
+        state.markers = np.array([tuple(f.location) for f in findings], dtype=np.float64).reshape(-1, 3)
+        state.marker_colors = np.array(
+            [ERROR_COLOR if f.severity == "ERROR" else WARNING_COLOR for f in findings]
+        )
         _ensure_running()
+    else:
+        state.markers = state.marker_colors = None
     state.dirty = True
     _rebuild()
     _stop_if_idle()
@@ -115,7 +123,7 @@ def current_set(context=None) -> list:
 
 
 def _has_points() -> bool:
-    return state.preview is not None or (state.unreachable is not None and len(state.unreachable) > 0)
+    return state.preview is not None or (state.markers is not None and len(state.markers) > 0)
 
 
 def _enabled(scene) -> bool:
@@ -152,9 +160,9 @@ def _rebuild() -> None:
             np.where(c.is_island[:, None], ISLAND_COLOR, SAMPLE_COLOR),
             np.tile(BLOCKED_COLOR, (len(blocked), 1)),
         ]
-    if state.unreachable is not None and len(state.unreachable):
-        positions.append(state.unreachable)
-        colors.append(np.tile(UNREACHABLE_COLOR, (len(state.unreachable), 1)))
+    if state.markers is not None and len(state.markers):
+        positions.append(state.markers)
+        colors.append(state.marker_colors)
     if positions:
         state.point_positions = np.concatenate(positions) / scale
         state.point_colors = np.concatenate(colors)

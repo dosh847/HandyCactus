@@ -17,6 +17,7 @@ from bpy.props import (
     CollectionProperty,
     EnumProperty,
     FloatProperty,
+    FloatVectorProperty,
     IntProperty,
     PointerProperty,
     StringProperty,
@@ -110,6 +111,15 @@ class HC_TargetRef(PropertyGroup):
     obj: PointerProperty(type=bpy.types.Object, poll=_is_mesh)
 
 
+class HC_Finding(PropertyGroup):
+    """One printability check result (core.checks.Finding)."""
+
+    code: StringProperty()
+    severity: StringProperty()  # ERROR or WARNING
+    message: StringProperty()
+    location: FloatVectorProperty(size=3, description="Where, in mm (world)")
+
+
 class HC_SupportSet(PropertyGroup):
     """Stored on a supports object: what it supports and how it was made."""
 
@@ -120,6 +130,29 @@ class HC_SupportSet(PropertyGroup):
     tree_count: IntProperty()
     unreachable_count: IntProperty()
     seconds: FloatProperty()
+    unreachable_json: StringProperty(description="Contacts that could not reach the bed (mm)")
+    findings: CollectionProperty(type=HC_Finding)
+    findings_index: IntProperty(name="Finding")
+    checked: BoolProperty(default=False)
+
+    def unreachable_points(self):
+        import numpy as np
+
+        return np.array(json.loads(self.unreachable_json) if self.unreachable_json else [], float).reshape(
+            -1, 3
+        )
+
+    def set_findings(self, findings) -> None:
+        self.findings.clear()
+        for f in findings:
+            item = self.findings.add()
+            item.code, item.severity, item.message, item.location = f.code, f.severity, f.message, f.location
+        self.findings_index = 0
+        self.checked = True
+
+    def counts(self) -> tuple[int, int]:
+        errors = sum(1 for f in self.findings if f.severity == "ERROR")
+        return errors, len(self.findings) - errors
 
     def target_objects(self) -> list:
         return [t.obj for t in self.targets if t.obj is not None]
@@ -135,7 +168,7 @@ def is_support(obj) -> bool:
     return obj is not None and obj.handycactus_set.is_support
 
 
-classes = (HC_Settings, HC_TargetRef, HC_SupportSet)
+classes = (HC_Settings, HC_TargetRef, HC_Finding, HC_SupportSet)
 
 
 def register():
