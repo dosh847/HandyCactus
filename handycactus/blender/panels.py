@@ -7,7 +7,13 @@ import bpy
 from bpy.types import Panel
 
 from ..core.params import GROUPS, PARAM_SPECS
-from .operators import HANDYCACTUS_OT_apply_preset
+from . import overlay
+from .operators import (
+    HANDYCACTUS_OT_apply_preset,
+    HANDYCACTUS_OT_clear_preview,
+    HANDYCACTUS_OT_place_on_bed,
+    HANDYCACTUS_OT_preview_contacts,
+)
 from .props import settings_to_params
 
 UNIT_SUFFIX = {"mm": "mm", "deg": "°", "mm/mm": "mm/mm", "x": "×", "": ""}
@@ -31,10 +37,24 @@ class HANDYCACTUS_PT_main(_HCPanel, Panel):
         row.prop(settings, "preset", text="")
         row.operator(HANDYCACTUS_OT_apply_preset.bl_idname, text="", icon="LOOP_BACK")
 
-        targets = [ob for ob in context.selected_objects if ob.type == "MESH"]
+        targets = overlay.current_set(context)
         box = layout.box()
         box.label(text=f"Targets: {len(targets)} selected mesh object(s)", icon="OBJECT_DATA")
-        box.label(text="Generation arrives in M2", icon="INFO")
+        box.operator(HANDYCACTUS_OT_place_on_bed.bl_idname, icon="TRIA_DOWN_BAR")
+
+        box = layout.box()
+        box.prop(settings, "show_heatmap", icon="SHADING_SOLID")
+        if settings.show_heatmap:
+            text = f"{overlay.state.face_count} faces need support"
+            if overlay.state.preview is not None and overlay.state.gap_face_count:
+                text += f", {overlay.state.gap_face_count} uncovered"
+            box.label(text=text)
+        row = box.row(align=True)
+        row.operator(HANDYCACTUS_OT_preview_contacts.bl_idname, icon="POINTCLOUD_DATA")
+        row.operator(HANDYCACTUS_OT_clear_preview.bl_idname, text="", icon="X")
+        if overlay.state.preview is not None:
+            box.label(text=overlay.contact_summary(overlay.state.preview))
+        layout.label(text="Support generation arrives in M2", icon="INFO")
 
         for problem in settings_to_params(settings).problems():
             layout.label(text=problem, icon="ERROR")

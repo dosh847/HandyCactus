@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""mathutils.bvhtree implementation of core.spatial.InsideTester."""
+
+from __future__ import annotations
+
+import numpy as np
+from mathutils import Matrix, Vector
+from mathutils.bvhtree import BVHTree
+
+from ..core.spatial import PARITY_DIRECTIONS
+
+# Below this |cos| between (point - nearest) and the face normal, the nearest
+# point is probably on an edge or vertex and its face normal can mislead.
+GRAZING_COS = 0.3
+_STEP = 1e-6  # Blender units, step past a hit before casting again
+
+
+class BVHInsideTester:
+    """Inside test in the BVH's own space; `to_local` maps query points (world mm) into it.
+
+    Inside-ness survives any invertible affine map, so testing in object
+    space against Blender's C-built BVH gives the same answer as world space.
+    """
+
+    def __init__(self, bvh: BVHTree, bounds_min, bounds_max, to_local: Matrix | None = None):
+        self.bvh = bvh
+        self.bounds_min = np.asarray(bounds_min, dtype=np.float64)
+        self.bounds_max = np.asarray(bounds_max, dtype=np.float64)
+        self._to_local = to_local
+        directions = [Vector(d) for d in PARITY_DIRECTIONS]
+        if to_local is not None:
+            linear = to_local.to_3x3()
+            directions = [(linear @ d).normalized() for d in directions]
+        self._directions = directions
+
+    @classmethod
+    def from_arrays(cls, verts: np.ndarray, tris: np.ndarray) -> BVHInsideTester:
+        bvh = BVHTree.FromPolygons(verts.tolist(), tris.tolist(), all_triangles=True)
+        return cls(bvh, verts.min(axis=0), verts.max(axis=0))
+
+    @classmethod
+    def from_object(cls, obj, depsgraph, scale_mm: float, bounds_min, bounds_max) -> BVHInsideTester:
+        """BVH of the evaluated object in object space; queries arrive as world mm."""
+        bvh = BVHTree.FromObject(obj.evaluated_get(depsgraph), depsgraph)
+        world_from_local = Matrix.Scale(scale_mm, 4) @ obj.evaluated_get(depsgraph).matrix_world
+        return cls(bvh, bounds_min, bounds_max, world_from_local.inverted())
+
+    def is_inside(self, points: np.ndarray) -> np.ndarray:
+        points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        out = np.zeros(len(points), dtype=bool)
+        to_local = self._to_local
+        for i, p in enumerate(points.tolist()):
+            v = Vector(p)
+            out[i] = self._inside(to_local @ v if to_local is not None else v)
+        return out
+
+    def _inside(self, p: Vector) -> bool:
+        location, normal, _index, distance = self.bvh.find_nearest(p)
+        if location is None:
+            return False
+        if distance > 1e-12:
+            cos = (p - location).dot(normal) / distance
+            if abs(cos) >= GRAZING_COS:
+                return cos < 0
+        votes = sum(self._odd_crossings(p, d) for d in self._directions)
+        return votes >= 2
+
+    def _odd_crossings(self, origin: Vector, direction: Vector) -> bool:
+        crossings = 0
+        o = origin.copy()
+        for _ in range(10_000):
+            hit, _n, _i, _d = self.bvh.ray_cast(o, direction)
+            if hit is None:
+                break
+            crossings += 1
+            o = hit + direction * _STEP
+        return crossings % 2 == 1

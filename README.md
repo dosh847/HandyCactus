@@ -13,8 +13,20 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Status
 
-**M0: skeleton.** The extension installs and shows a **HandyCactus** tab in
-the 3D viewport sidebar (N panel), with presets and every parameter.
+**M1: detection and heatmap.** The **HandyCactus** tab in the 3D viewport
+sidebar (N panel) has presets and every parameter, plus:
+
+- **Place on Bed**: moves the selected meshes together so their lowest point
+  sits at the lift height.
+- **Overhang Heatmap**: colours the faces of the selected meshes that need
+  support (yellow to red). Also available in the viewport Overlays popover.
+- **Preview Contacts**: shows where support tips would touch the model.
+  Green dots are samples and blue dots are islands. Magenta faces on the
+  heatmap are coverage gaps.
+
+Paint a vertex group named `HC_Force` to force supports on an area, or
+`HC_Block` to keep them off it.
+
 Support generation arrives in M2; see the milestones in the spec.
 
 ## Layout
@@ -41,14 +53,16 @@ pytest tests/core
 ```
 
 Blender tests and the extension build use Blender as a Python module. It
-needs Python 3.13 and is a ~400 MB download:
+needs Python 3.13 and is a ~400 MB download. The overlay draw test also
+needs an offscreen GPU (on Linux: `libegl1 libegl-mesa0 libgl1-mesa-dri`)
+and skips itself without one:
 
 ```sh
 pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.1.0.zip
+python tools/extension.py install-check dist/handycactus-0.2.0.zip
 ```
 
 ### Installing for development

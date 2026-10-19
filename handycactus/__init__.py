@@ -6,9 +6,9 @@
 
 
 def _modules():
-    from .blender import operators, panels, props
+    from .blender import operators, overlay, panels, props
 
-    return (props, operators, panels)
+    return (props, overlay, operators, panels)
 
 
 def register():

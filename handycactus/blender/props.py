@@ -9,7 +9,7 @@ support set keeps the parameters it was made with (spec section 5.1).
 from __future__ import annotations
 
 import bpy
-from bpy.props import EnumProperty, FloatProperty, IntProperty, PointerProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty
 from bpy.types import PropertyGroup
 
 from ..core.params import DEFAULT_PRESET_ID, PARAM_SPECS, PRESETS, PRESETS_BY_ID, Params
@@ -26,6 +26,12 @@ def settings_to_params(settings) -> Params:
 
 def _on_preset_changed(self, _context):
     apply_preset(self, self.preset)
+
+
+def _on_heatmap_toggled(self, context):
+    from . import overlay  # overlay imports this module
+
+    overlay.sync(context.scene)
 
 
 def _param_property(spec):
@@ -53,6 +59,12 @@ def _build_settings_class():
             items=[(p.id, p.label, p.description) for p in PRESETS],
             default=DEFAULT_PRESET_ID,
             update=_on_preset_changed,
+        ),
+        "show_heatmap": BoolProperty(
+            name="Overhang Heatmap",
+            description="Colour the faces of the selected meshes that need support",
+            default=False,
+            update=_on_heatmap_toggled,
         ),
     }
     for spec in PARAM_SPECS:

@@ -162,17 +162,25 @@ Locked trees are loaded first and are never changed by the pipeline.
   numpy arrays: vertex positions (mm, world space), triangles (from loop
   triangles), face normals, face areas, vertex adjacency, and a per-face
   `target_index`.
-- Build one `BVHTree.FromPolygons` over the combined mesh, so every target
-  is an obstacle for every other target's tips and branches. Keep one BVH per
-  target for the inside test below.
+- Build one BVH over the combined mesh, so every target is an obstacle for
+  every other target's tips and branches (needed from M2). The inside test
+  below uses one BVH per target, built in C with `BVHTree.FromObject` in
+  object space. Query points are mapped into object space, which gives the
+  same inside/outside answer. A target's BVH is built only when its bounds
+  overlap another target's, because otherwise it is never queried.
 - **Overlapping parts**: multi-part minis often intersect (an arm pushed into
   the body). Any face, sample or contact that lies **inside another target**
   is discarded, because it will never print as a surface. "Inside" is decided
   with a BVH nearest-point query on the other target: the point is inside if
   its offset to the nearest point lies on the inner side of that face's
-  normal. Fall back to an odd/even ray-count test when the nearest face is
-  ambiguous (near edges). Targets that are not closed meshes produce a
-  warning, and this test is skipped for them.
+  normal. When the nearest point is ambiguous (|cos| between the offset and
+  the normal < 0.3, i.e. near an edge or vertex), fall back to an odd/even
+  ray-count test on 3 skewed rays, taking the majority. Faces are tested at
+  their centroids, and samples and contacts at their own position. Targets
+  that are not closed meshes produce a warning, and this test is skipped for
+  them. The core sees this only as an `InsideTester` protocol
+  (`core/spatial.py`), so it stays free of bpy; tests use an exact numpy
+  ray-parity version.
 
 ### 6.2 Contact detection
 A face **needs support** when `normal.z < -sin(overhang_angle)`.
@@ -187,16 +195,31 @@ point is inside the other part.
    patches. Sample each patch with area-weighted Poisson-disk sampling at
    `tip_spacing` (default 1.5 mm). Spacing is scaled down by
    `steepness_density` as the face approaches horizontal.
-2. **Islands / local minima**: any vertex lower than all of its 1-ring
-   neighbours (tolerance 0.01 mm) becomes a forced contact. Each overhang
-   patch also always gets a contact at its lowest point, even if sampling
-   missed it. These contacts are tagged `island` and are never dropped by
-   the bridging step.
-3. **Bridging**: inside a patch, drop a sample when its horizontal distance
-   to the nearest *supported boundary* is ≤ `max_bridge / 2`
-   (default `max_bridge` = 2 mm). A supported boundary is a patch boundary
-   edge whose neighbouring face does not need support. This is a v1
-   heuristic and needs testing against real minis.
+2. **Islands / local minima**: a vertex becomes a forced `MINIMUM` contact
+   when it is at least `0.01 mm` below every 1-ring neighbour **and** its
+   vertex normal points down. The depth stops float32 noise on flat faces
+   reading as minima. A shallow real minimum lies inside an overhang patch
+   and is caught by the next rule instead.
+
+   Each overhang patch also gets a `PATCH_LOWEST` contact at its lowest
+   vertex, using that patch face's normal rather than the vertex normal,
+   which leans into the walls on a rim. The one exception: the point is
+   skipped when it is within `max_bridge / 2` of one of the patch's
+   supported boundaries, because the patch hangs from that support (a
+   bridge, or a short cantilever root).
+
+   Forced contacts are never dropped by the bridging step. Minima win over
+   patch-lowest points when deduplicating.
+3. **Bridging**: drop a sample when its 3D distance to the nearest
+   *supported boundary* of its own patch is ≤ `max_bridge / 2` (default
+   `max_bridge` = 2 mm). A supported boundary is a patch boundary edge whose
+   neighbouring face **continues downward**: that face's third vertex is
+   below the edge. Neighbours resting on the bed, or buried inside another
+   target, also count.
+
+   A neighbour that goes *up* does not count. The vertical side wall of a
+   cantilever's underside hangs in the air itself, so it supports nothing.
+   This is a v1 heuristic and needs testing against real minis.
 4. **Paint masks**: vertex group `HC_Force` (weight > 0.5) forces sampling
    at the patch spacing even below the overhang threshold. `HC_Block`
    (weight > 0.5) removes all contacts, including islands, and the check
@@ -305,13 +328,26 @@ for confirmation.
 ## 8. Overhang heatmap overlay
 
 - A viewport draw handler (`gpu` module, `POST_VIEW`) draws a colour ramp on
-  the faces of every target in the active set, by severity: from "needs support" (yellow) to horizontal
-  (red). Faces that need support but are farther than `tip_spacing` from any
-  contact are drawn with a hatch or brighter red, to show coverage gaps.
-- Unreachable contacts and failed checks are drawn as red markers.
-- The overlay recomputes on depsgraph updates of the model, throttled to at
-  most 4 times a second. Batches are cached, and recomputation uses numpy
-  only (no BVH queries).
+  the faces of every target in the active set, by severity: from "needs
+  support" (yellow) to horizontal (red). Faces that need support but are
+  farther than `tip_spacing` from any contact are drawn in a magenta gap
+  colour, to show coverage gaps.
+- **Until M2** there are no support sets yet, so the "active set" is the
+  selected mesh objects.
+- **Preview Contacts** runs detection (§6.2) on that set and draws the
+  contacts as points:
+  - green for samples;
+  - blue for islands (minima and patch-lowest points);
+  - grey for islands removed by `HC_Block`.
+
+  The preview is dropped as soon as one of its objects is edited or moved.
+- Unreachable contacts and failed checks are drawn as red markers (M2/M3).
+- The overlay recomputes on a 0.25 s timer (at most 4 times a second),
+  never inside the draw callback. Depsgraph updates of the set's objects
+  mark it dirty.
+  - The evaluated mesh is cached, so parameter changes only rebuild colours.
+  - GPU batches are rebuilt only when the arrays change.
+  - Recomputation uses numpy only (no BVH queries).
 - Toggle it in the N-panel and in the viewport overlay popover.
 
 ## 9. Parameters and presets
@@ -453,11 +489,28 @@ Reference machine: a 2023 mid-range laptop CPU.
 
 | Case | Target |
 |---|---|
-| Heatmap update, 500k tris | < 100 ms |
+| Heatmap update, 500k tris (parameter change) | < 100 ms |
+| Heatmap update, 500k tris (geometry edit) | < 100 ms; see note |
 | Detection, 500k tris | < 1.5 s |
 | Tips + routing, 1,000 tips | < 4 s |
 | Incremental add-tip | < 150 ms |
 | Generate end to end, typical 42 mm mini (~500k tris over 1–5 parts, ~600 tips) | < 4 s |
+
+**Measured at M1** (Blender 5.2 `bpy` in the CI container, best of 3,
+500k-triangle sphere plus an overlapping 8k-triangle part):
+
+| Case | Time |
+|---|---|
+| Heatmap update, parameter change | 49 ms |
+| Heatmap update, parameter change, with coverage gaps | 149 ms |
+| Heatmap update, geometry edit | 304 ms |
+| Detection end to end (read + inside BVH + detect) | 1.5 s |
+
+Reading the evaluated mesh (about 250 ms) dominates geometry-edit updates.
+Two fixes are planned for M2:
+- cache each target separately, so editing one part does not re-read the
+  others;
+- skip the coverage-gap pass while the user is dragging.
 
 Long operations show progress (`wm.progress_begin/update`) and can be
 cancelled with Esc. They run in a modal timer operator that processes the
