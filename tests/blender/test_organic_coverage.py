@@ -60,3 +60,10 @@ def test_overhangs_are_covered(organic):
     params = settings_to_params(bpy.context.scene.handycactus)
     h = heatmap.build(run.mesh, params, run.result.contacts.positions)
     assert h.gap_face_count <= 0.12 * h.face_count, (h.gap_face_count, h.face_count)
+
+
+def test_most_contacts_reach_the_bed(organic):
+    result = pipeline.generate(bpy.context, [organic])
+    # Before the knuckle-room fix 21% of contacts got stuck here (now ~17%); the rest sit in
+    # sub-1 mm gaps between overlapping feathers, which needs landing on the model (v2).
+    assert result.unreachable <= 0.19 * (result.tips + result.unreachable), (result.unreachable, result.tips)

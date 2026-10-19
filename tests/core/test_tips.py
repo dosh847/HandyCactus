@@ -95,3 +95,15 @@ def test_candidate_axes_start_with_the_clamped_normal(n):
     axes = tips.candidate_axes(np.array(n), 45)
     assert np.allclose(axes[0], tips.clamp_to_cone(np.array(n), 45)[0])
     assert np.all(np.degrees(np.arccos(np.clip(-axes[:, 2], -1, 1))) <= 45 + 1e-6)
+
+
+def test_knuckles_leave_room_for_a_branch():
+    # A contact under a plate with another plate 1.2 mm below: a knuckle there would trap
+    # its branch. Every accepted knuckle keeps min_radius + the hard branch clearance.
+    shape = voxels([((0, 0, 6), (10, 10, 7)), ((0, 0, 3), (6, 10, 4.8))])
+    pts = [[x, 5.0, 6.0] for x in np.arange(1.0, 10.0, 1.0)]
+    t = tips.build_tips(contacts(pts, [[0, 0, -1]] * len(pts)), Params(), obstacles(shape))
+    p = Params()
+    d = obstacles(shape).nearest_distance(t.knuckle[t.ok])
+    assert np.all(d >= p.min_radius + tips.BRANCH_HARD_CLEARANCE - 1e-6)
+    assert t.ok.any()

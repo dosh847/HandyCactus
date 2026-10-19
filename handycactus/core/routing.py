@@ -22,10 +22,12 @@ import numpy as np
 from .graph import BRANCH, CONTACT, FOOT, JUNCTION, KNUCKLE, GraphBuilder, SupportGraph
 from .params import Params
 from .spatial import Obstacles
-from .tips import Tips
+from .tips import BRANCH_HARD_CLEARANCE, Tips
 
 MERGE_SLACK = 0.3  # mm beyond the larger radius at which two heads merge
-LOOKAHEAD = 30.0  # mm: how far down a head looks for the model in its way
+# Branches aim for radius + model_clearance from the model, but may pass as close as
+# radius + HARD_CLEARANCE when that is the only way down.
+HARD_CLEARANCE = BRANCH_HARD_CLEARANCE
 AVOID_AZIMUTHS = 16
 DECIMATE_DEGREES = 3.0  # straight-enough runs of branch nodes collapse to one segment
 
@@ -44,6 +46,8 @@ class _Head:
     awake: bool = False
     prev: np.ndarray | None = None  # position before this level's move
     reach: float = 0.0  # horizontal reach of this level's move (cone limit)
+    blocked: bool = False  # the model is straight below: escaping, not merging
+    escape: np.ndarray | None = None  # unit direction of a straight free path to the bed
 
 
 def route(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
@@ -73,7 +77,7 @@ def route(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
             if not h.awake and h.pos[2] > new_level:
                 h.awake = True
         awake = [h for h in heads if h.awake]
-        targets = _desired_xy(awake, heads, params, obstacles, tan)
+        targets = _desired_xy(awake, heads, params, obstacles, tan, new_level)
         moved: list[_Head] = []
         for h, target_xy in zip(awake, targets, strict=True):
             new_pos = _move(h, target_xy, new_level, params, obstacles, tan)
@@ -110,56 +114,94 @@ def route(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
     return RoutingResult(graph, np.setdiff1d(all_tips, supported))
 
 
-def _desired_xy(awake, heads, params, obstacles, tan) -> list[np.ndarray]:
-    """Where each awake head would like to go (xy), before collision checks."""
+def _desired_xy(awake, heads, params, obstacles, tan, new_level) -> list[np.ndarray]:
+    """Where each awake head would like to go (xy), before collision checks.
+
+    A head with the model straight below it is *blocked*: it follows a
+    straight path to the bed found inside its cone (the most vertical one),
+    and takes no part in merging until it is clear. Free heads lean toward
+    the nearest free head they could merge with, or go straight down.
+    """
     if not awake:
         return []
     a_pos = np.array([h.pos for h in awake])
+    down = np.tile([0.0, 0.0, -1.0], (len(awake), 1))
+    hit = obstacles.ray_distance(a_pos, down, float(a_pos[:, 2].max()) + 1.0)
+    for h, d in zip(awake, hit, strict=True):
+        h.blocked = bool(np.isfinite(d) and d < h.pos[2])
+
     all_pos = np.array([h.pos for h in heads])
+    free = np.array([not h.blocked for h in heads])
     d_xy = np.linalg.norm(a_pos[:, None, :2] - all_pos[None, :, :2], axis=2)
     below_or_level = all_pos[None, :, 2] <= a_pos[:, None, 2] + 1e-9
     index_of = {id(h): i for i, h in enumerate(heads)}
     awake_idx = np.array([index_of[id(h)] for h in awake])
     same = awake_idx[:, None] == np.arange(len(heads))[None, :]
-    candidate = below_or_level & ~same & (d_xy <= params.merge_distance)
+    candidate = below_or_level & ~same & free[None, :] & (d_xy <= params.merge_distance)
     d_xy = np.where(candidate, d_xy, np.inf)
     partner = np.argmin(d_xy, axis=1)
     has_partner = np.isfinite(d_xy[np.arange(len(awake)), partner])
 
     out = []
-    blocked_idx = []
     for i, h in enumerate(awake):
-        if has_partner[i]:
+        if h.blocked:
+            direction = _escape(h, obstacles, tan)
+            dz = h.pos[2] - new_level
+            out.append(h.pos[:2] + direction[:2] / max(-direction[2], 1e-6) * dz)
+        elif has_partner[i]:
+            h.escape = None
             other = heads[partner[i]]
             if other.awake:  # meet halfway; the other head walks toward us too
                 out.append((h.pos[:2] + other.pos[:2]) / 2)
             else:
                 out.append(other.pos[:2].copy())
         else:
+            h.escape = None
             out.append(h.pos[:2].copy())
-            blocked_idx.append(i)
-
-    # Heads going straight down: if the model is in the way, head for open space.
-    if blocked_idx:
-        origins = a_pos[blocked_idx]
-        down = np.tile([0.0, 0.0, -1.0], (len(origins), 1))
-        hit = obstacles.ray_distance(origins, down, LOOKAHEAD)
-        for j, i in enumerate(blocked_idx):
-            if np.isfinite(hit[j]) and hit[j] < origins[j, 2]:
-                out[i] = _open_direction(awake[i], params, obstacles, tan)
     return out
 
 
-def _open_direction(h, params, obstacles, tan) -> np.ndarray:
-    """xy target in the cone direction whose downward-slanted ray runs free the longest."""
-    phis = 2 * np.pi * np.arange(AVOID_AZIMUTHS) / AVOID_AZIMUTHS
-    horiz = np.stack([np.cos(phis), np.sin(phis), np.zeros_like(phis)], axis=1)
-    dirs = horiz * np.sin(np.arctan(tan)) + np.array([0, 0, -np.cos(np.arctan(tan))])
-    origins = np.tile(h.pos, (AVOID_AZIMUTHS, 1))
-    free = obstacles.ray_distance(origins, dirs, LOOKAHEAD)
-    free = np.where(np.isfinite(free), free, LOOKAHEAD * 2)
-    best = int(np.argmax(free))
-    return h.pos[:2] + horiz[best, :2] * LOOKAHEAD
+def _escape(h, obstacles, tan) -> np.ndarray:
+    """A unit direction inside the branch cone whose ray reaches the bed unobstructed.
+
+    Keeps the previous escape while it stays free. Otherwise tries cone
+    directions from most vertical outward; with no free one, takes the
+    direction that runs free the longest.
+    """
+    if h.escape is not None and _reaches_bed(h.pos, h.escape[None], obstacles)[0]:
+        return h.escape
+    dirs = _ESCAPE_DIRS_CACHE.get(tan)
+    if dirs is None:
+        dirs = _cone_directions(np.degrees(np.arctan(tan)))
+        _ESCAPE_DIRS_CACHE[tan] = dirs
+    free = _reaches_bed(h.pos, dirs, obstacles)
+    if free.any():
+        h.escape = dirs[int(np.argmax(free))]  # dirs are ordered most vertical first
+        return h.escape
+    h.escape = None
+    length = h.pos[2] / np.maximum(-dirs[:, 2], 1e-6)
+    dist = obstacles.ray_distance(np.tile(h.pos, (len(dirs), 1)), dirs, float(length.max()) + 1.0)
+    return dirs[int(np.argmax(np.where(np.isfinite(dist), dist, length)))]
+
+
+def _reaches_bed(pos, dirs, obstacles) -> np.ndarray:
+    length = pos[2] / np.maximum(-dirs[:, 2], 1e-6)
+    dist = obstacles.ray_distance(np.tile(pos, (len(dirs), 1)), dirs, float(length.max()) + 1.0)
+    return ~np.isfinite(dist) | (dist >= length)
+
+
+def _cone_directions(max_angle_deg: float) -> np.ndarray:
+    """Unit directions in the downward cone, most vertical first (rings of 16)."""
+    out = [(0.0, 0.0, -1.0)]
+    for frac in (0.25, 0.5, 0.75, 1.0):
+        a = np.radians(max_angle_deg * frac)
+        for k in range(AVOID_AZIMUTHS):
+            phi = 2 * np.pi * k / AVOID_AZIMUTHS
+            out.append((np.sin(a) * np.cos(phi), np.sin(a) * np.sin(phi), -np.cos(a)))
+    return np.array(out)
+
+
+_ESCAPE_DIRS_CACHE: dict[float, np.ndarray] = {}
 
 
 def _move(h, target_xy, new_level, params, obstacles, tan) -> np.ndarray | None:
@@ -171,25 +213,31 @@ def _move(h, target_xy, new_level, params, obstacles, tan) -> np.ndarray | None:
     desired = np.array([h.pos[0] + step_xy[0], h.pos[1] + step_xy[1], new_level])
 
     need = h.radius + params.model_clearance
+    hard = h.radius + HARD_CLEARANCE
     d_old = float(obstacles.nearest_distance(h.pos[None])[0])
     d_new = float(obstacles.nearest_distance(desired[None])[0])
-    if d_new >= need or d_new >= d_old:
+    if d_new >= need or d_new >= min(d_old, need):
         return desired
 
-    # Try the cone's rim and half-rim plus straight down; prefer clear moves near the wish.
+    # Try the cone's rim and half-rim plus straight down. Prefer moves that keep the full
+    # clearance (or do not lose any), nearest the wish; failing that, any move that keeps
+    # the hard minimum, the farthest from the model first.
     phis = 2 * np.pi * np.arange(AVOID_AZIMUTHS) / AVOID_AZIMUTHS
     rim = np.stack([np.cos(phis), np.sin(phis)], axis=1)
     offsets = np.vstack([[0.0, 0.0], rim * reach, rim * reach * 0.5])
-    cands = np.column_stack([h.pos[:2] + offsets, np.full(len(offsets), new_level)])
-    d = obstacles.nearest_distance(cands)
-    ok = (d >= need) | (d >= d_old)
+    cands = np.vstack([desired, np.column_stack([h.pos[:2] + offsets, np.full(len(offsets), new_level)])])
+    d = np.concatenate([[d_new], obstacles.nearest_distance(cands[1:])])
+    ok = (d >= need) | (d >= min(d_old, need))
     if ok.any():
         score = np.linalg.norm(cands[:, :2] - desired[:2], axis=1)
         score[~ok] = np.inf
         return cands[int(np.argmin(score))]
-    best = int(np.argmax(d))
-    if d[best] > d_old - 1e-6:
-        return cands[best]
+    tight = d >= hard
+    if tight.any():
+        # Near the wish, among the moves that keep the most room (within 0.1 mm of the best).
+        roomy = tight & (d >= d[tight].max() - 0.1)
+        score = np.where(roomy, np.linalg.norm(cands[:, :2] - desired[:2], axis=1), np.inf)
+        return cands[int(np.argmin(score))]
     return None
 
 
@@ -220,7 +268,8 @@ def _merge_and_extend(b: GraphBuilder, awake, heads, params) -> None:
         # Every member must reach the junction from its previous node inside its cone.
         return bool(np.all(np.linalg.norm(prev[idx] - p[:2], axis=1) <= reach[idx]))
 
-    pairs = np.argwhere(np.triu(d <= limit, k=1))
+    blocked = np.array([h.blocked for h in awake])
+    pairs = np.argwhere(np.triu((d <= limit) & ~blocked[:, None] & ~blocked[None, :], k=1))
     for i, j in sorted(pairs.tolist(), key=lambda ij: d[ij[0], ij[1]]):
         gi, gj = find(i), find(j)
         if gi == gj:

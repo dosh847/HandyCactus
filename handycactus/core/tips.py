@@ -24,6 +24,10 @@ HIT_TOLERANCE = 0.05  # mm: the ray from the knuckle must first hit at the conta
 AZIMUTHS = 8
 TILT_STEPS = (1 / 3, 2 / 3, 1.0)
 LENGTH_STEPS = (1.0, 0.75, 0.5)
+LONG_STEPS = (1.5, 2.0)  # longer tips, tried last, to reach out of crevices
+# A branch must be able to start at the knuckle: it needs min_radius plus this much air
+# around it (the hard minimum branches keep while routing; two 0.2 mm lines).
+BRANCH_HARD_CLEARANCE = 0.4
 
 
 @dataclass
@@ -84,16 +88,26 @@ def build_tips(contacts: Contacts, params: Params, obstacles: Obstacles) -> Tips
     lengths = [params.tip_length * f for f in LENGTH_STEPS if params.tip_length * f >= params.min_tip_length]
     if params.min_tip_length not in lengths:
         lengths.append(params.min_tip_length)
+    lengths += [params.tip_length * f for f in LONG_STEPS]
+    # Room for the branch at the knuckle: the full branch clearance if possible, else the
+    # hard minimum. A knuckle tucked into a crevice would leave its branch stuck.
+    rooms = (
+        params.min_radius + params.model_clearance,
+        params.min_radius + BRANCH_HARD_CLEARANCE,
+    )
 
     for i in range(k):
         p, n = surface[i], contacts.normals[i]
         axes = candidate_axes(n, params.max_tip_angle)
-        for length_i in lengths:
-            # The preferred axis almost always works; only test the cone ring if it doesn't.
-            for chunk in (axes[:1], axes[1:]):
-                valid = _valid(p, chunk, length_i, r_contact, r_knuckle, obstacles)
-                if valid.any():
-                    axis[i], length[i], ok[i] = chunk[int(np.argmax(valid))], length_i, True
+        for room in rooms:
+            for length_i in lengths:
+                # The preferred axis almost always works; only test the cone ring if it doesn't.
+                for chunk in (axes[:1], axes[1:]):
+                    valid = _valid(p, chunk, length_i, r_contact, r_knuckle, room, obstacles)
+                    if valid.any():
+                        axis[i], length[i], ok[i] = chunk[int(np.argmax(valid))], length_i, True
+                        break
+                if ok[i]:
                     break
             if ok[i]:
                 break
@@ -105,8 +119,9 @@ def build_tips(contacts: Contacts, params: Params, obstacles: Obstacles) -> Tips
     return Tips(surface, contact, knuckle, axis, length, ok, contacts.target.copy())
 
 
-def _valid(p, axes, length, r_contact, r_knuckle, obstacles) -> np.ndarray:
-    """Which candidate axes give a clear tip of this length at contact p."""
+def _valid(p, axes, length, r_contact, r_knuckle, room, obstacles) -> np.ndarray:
+    """Which candidate axes give a clear tip of this length at contact p, with `room` mm
+    of air around the knuckle for its branch."""
     m = len(axes)
     knuckles = p + axes * length
     valid = knuckles[:, 2] >= r_knuckle  # knuckle above the bed
@@ -117,7 +132,9 @@ def _valid(p, axes, length, r_contact, r_knuckle, obstacles) -> np.ndarray:
     ts = np.linspace(min(NEAR_CONTACT, length / 2), length, 4)
     samples = (p + axes[:, None, :] * ts[None, :, None]).reshape(-1, 3)
     radius = r_contact + (r_knuckle - r_contact) * (ts / length)
-    need = np.tile(radius + TIP_CLEARANCE, m)
+    need_per_t = radius + TIP_CLEARANCE
+    need_per_t[-1] = max(need_per_t[-1], room)  # the last sample is the knuckle
+    need = np.tile(need_per_t, m)
     idx = np.flatnonzero(np.repeat(valid, len(ts)))
     clear = np.zeros(len(samples), bool)
     if len(idx):
