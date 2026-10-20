@@ -32,6 +32,7 @@ from .graph import (
     GraphBuilder,
     SupportGraph,
 )
+from .overlap import repair_overlaps
 from .params import Params, radius_at
 from .smoothing import smooth
 from .spatial import Obstacles
@@ -188,6 +189,8 @@ def route(
     smooth(graph, params, obstacles, fixed, HARD_CLEARANCE)
     graph = _decimate(graph)  # attached roots have no parent, so they are never removed
     attachments = _remap_after_decimate(graph, attachments)
+    # Segments between checked nodes can still cut through thin parts of the model.
+    repair_overlaps(graph, params, obstacles)  # only appends nodes: attachments stay valid
     graph.renumber_trees()
     junction = graph.kind == JUNCTION
     graph.sphere[junction] = graph.radius[junction]

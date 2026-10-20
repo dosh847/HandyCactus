@@ -100,3 +100,15 @@ def test_coverage_gap_regions(generated):
     gaps = checks.check_coverage(trimmed, Params(), mesh)
     assert len(gaps) == 1
     assert gaps[0].location[0] > 4
+
+
+def test_branch_buried_in_the_model_is_a_collision():
+    # The whole branch runs through the middle of a thick block, far from every face:
+    # unsigned distances alone call it clear.
+    block = voxels([((-5, -5, 1), (5, 5, 9))])
+    mesh = combine([block])
+    obstacles = NumpyObstacles(mesh.verts, mesh.tris)
+    g = single_tree([(0, 0, 7.2), (0, 0, 7), (0, 0, 6), (0, 0, 4), (0, 0, 0.4), (0, 0, 0)],
+                    [0.15, 0.2, 0.3, 0.3, 0.3, 1.5])  # fmt: skip
+    hits = [f for f in checks.run_checks(g, Params(), obstacles=obstacles) if f.code == "collision"]
+    assert len(hits) == 1 and "runs into" in hits[0].message

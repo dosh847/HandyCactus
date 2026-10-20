@@ -147,6 +147,26 @@ class NumpyObstacles:
         return column_occupancy_from_triangles(self._a, self._b, self._c, xy, z)
 
 
+def points_inside(obstacles, points: np.ndarray) -> np.ndarray:
+    """(N,) bool: which points are inside the model, by the vertical-ray winding number of
+    `column_occupancy` (all False when the obstacles have none). Distances alone cannot
+    tell: a point 1 mm inside a thick part is as far from the surface as one 1 mm out."""
+    points = np.asarray(points, np.float64).reshape(-1, 3)
+    out = np.zeros(len(points), bool)
+    if not hasattr(obstacles, "column_occupancy") or len(points) == 0:
+        return out
+    for start in range(0, len(points), INSIDE_CHUNK):
+        p = points[start : start + INSIDE_CHUNK]
+        # The walk starts 1 mm below the lowest height asked for: ask for one under the bed.
+        z = np.concatenate([[min(-1.0, float(p[:, 2].min()) - 1.0)], p[:, 2]])
+        occ = obstacles.column_occupancy(p[:, :2], z)
+        out[start : start + len(p)] = occ[1 + np.arange(len(p)), np.arange(len(p))]
+    return out
+
+
+INSIDE_CHUNK = 256
+
+
 def column_occupancy_from_triangles(a, b, c, xy, z) -> np.ndarray:
     """Vertical-ray winding numbers: for each column, every triangle whose XY projection
     holds it crosses it at the barycentric height; a face pointing down is an entry going

@@ -15,7 +15,7 @@ import numpy as np
 
 from .detection import Contacts
 from .params import Params
-from .spatial import Obstacles
+from .spatial import Obstacles, points_inside
 
 DOWN = np.array([0.0, 0.0, -1.0])
 TIP_CLEARANCE = 0.1  # mm between the tip cone (or knuckle ball) and the model
@@ -141,6 +141,14 @@ def _valid(p, axes, length, r_contact, r_knuckle, room, obstacles) -> np.ndarray
         samples = (p + axes[idx, None, :] * ts[None, :, None]).reshape(-1, 3)
         clear = obstacles.nearest_distance(samples) >= np.tile(radius + TIP_CLEARANCE, len(idx)) - 1e-9
         valid[idx] = clear.reshape(len(idx), len(ts)).all(axis=1)
+    # Outside the model: distances are unsigned, so a tip that grazes the contact and dives
+    # into the model (the look-back ray then hits just short of the contact) passes all of
+    # the above with its knuckle a millimetre inside.
+    idx = np.flatnonzero(valid)
+    if len(idx):
+        ts = np.array([min(NEAR_CONTACT, length / 2), length])
+        samples = (p + axes[idx, None, :] * ts[None, :, None]).reshape(-1, 3)
+        valid[idx] = ~points_inside(obstacles, samples).reshape(len(idx), len(ts)).any(axis=1)
     return valid
 
 

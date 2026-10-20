@@ -7,3 +7,4 @@ venv/
 dist/
 *.zip
 *.blend1
+zip/

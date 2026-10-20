@@ -107,3 +107,12 @@ def test_knuckles_leave_room_for_a_branch():
     d = obstacles(shape).nearest_distance(t.knuckle[t.ok])
     assert np.all(d >= p.min_radius + tips.BRANCH_HARD_CLEARANCE - 1e-6)
     assert t.ok.any()
+
+
+def test_points_inside_a_block():
+    from handycactus.core.spatial import points_inside
+
+    mesh = combine([voxels([((-2, -2, 2), (2, 2, 6))])])
+    obstacles = NumpyObstacles(mesh.verts, mesh.tris)
+    pts = np.array([(0, 0, 4), (1.5, -1.5, 2.5), (0, 0, 7), (3, 0, 4), (0, 0, 1)])
+    assert points_inside(obstacles, pts).tolist() == [True, True, False, False, False]

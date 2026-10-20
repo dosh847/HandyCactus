@@ -17,7 +17,7 @@ from .graph import CONTACT, FLAG_THICK_LANDING, FOOT, JUNCTION, KNUCKLE, LANDING
 from .heatmap import COVERAGE_FACTOR, covered, estimate_support_faces
 from .mesh_data import MeshData, connected_components
 from .params import Params
-from .spatial import Obstacles
+from .spatial import Obstacles, points_inside
 from .tips import BRANCH_HARD_CLEARANCE
 
 ERROR = "ERROR"
@@ -164,6 +164,8 @@ def check_collision(graph: SupportGraph, params: Params, obstacles: Obstacles) -
     pts = a[seg] + (b - a)[seg] * t[:, None]
     radius = graph.radius[e[seg, 0]] + (graph.radius[e[seg, 1]] - graph.radius[e[seg, 0]]) * t
     gap = obstacles.nearest_distance(pts) - radius if len(pts) else np.zeros(0)
+    buried = points_inside(obstacles, pts)
+    gap[buried] = -(gap[buried] + 2 * radius[buried])  # inside: at least this deep
     limit = min(0.5 * params.model_clearance, BRANCH_HARD_CLEARANCE) - 0.05
     hits = gap < limit
     if not hits.any():
