@@ -11,7 +11,7 @@ import bpy
 import numpy as np
 from mathutils import Matrix
 
-from ..core import checks, detection, editing, routing, tips
+from ..core import checks, detection, editing, reach, relocate, tips
 from ..core.graph import CONTACT, FOOT, LANDING
 from ..core.mesh_data import MeshData, combine
 from . import gn_builder, graph_io
@@ -153,7 +153,9 @@ def generate(context, objects, support=None) -> GenerateResult:
             contacts, np.array(kept_tips).reshape(-1, 3), 0.5 * params.tip_spacing
         )
     built = tips.build_tips(contacts, params, obstacles)
-    routed = routing.route(built, params, obstacles)
+    settled = relocate.relocate_failed(contacts, built, mesh, found.support_faces, params, obstacles)
+    built = settled.tips
+    routed = reach.route_with_retry(built, params, obstacles)
     graph = routed.graph
     if kept is not None and len(kept):
         graph.tip = np.where(graph.tip >= 0, graph.tip + editing.next_tip_id(kept), -1)

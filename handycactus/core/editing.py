@@ -53,13 +53,18 @@ def next_tip_id(graph: SupportGraph) -> int:
 
 
 def merge_routed(
-    existing: SupportGraph, routed: RoutingResult, params: Params
+    existing: SupportGraph, routed: RoutingResult, params: Params, tip_ids: np.ndarray | None = None
 ) -> tuple[SupportGraph, np.ndarray]:
     """Add newly routed trees to an existing graph, joining attachments and thickening the
-    branches below each join. Returns the graph and a mask of the new nodes."""
+    branches below each join. Returns the graph and a mask of the new nodes.
+
+    The new tips are numbered after the existing ones, or mapped through `tip_ids` (new
+    tip i becomes tip_ids[i])."""
     new = routed.graph
-    offset = next_tip_id(existing)
-    new.tip = np.where(new.tip >= 0, new.tip + offset, -1)
+    if tip_ids is None:
+        new.tip = np.where(new.tip >= 0, new.tip + next_tip_id(existing), -1)
+    else:
+        new.tip = np.where(new.tip >= 0, np.asarray(tip_ids)[np.maximum(new.tip, 0)], -1)
     merged = concat(existing, new)
     n0 = len(existing)
     roots = new.roots() if len(new) else np.zeros(0, np.int64)

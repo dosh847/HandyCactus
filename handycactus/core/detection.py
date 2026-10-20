@@ -46,6 +46,12 @@ class TooManyContacts(ValueError):
 
 _EPS = 1e-3  # mm
 MINIMUM_DEPTH = 0.01  # mm, spec 6.2 step 2
+# A patch growing from material below it needs no support while smaller than this
+# × tip_spacing² (0.56 mm² at the default 1.5 mm spacing): sculpted wrinkles, scales.
+SMALL_PATCH_FACTOR = 0.25
+# ... and only while shallow: area-weighted overhang severity below this (0 at the overhang
+# angle, 1 for a horizontal ceiling; 0.5 is about 67° from vertical at the default 45°).
+SELF_SUPPORT_SEVERITY = 0.5
 
 
 @dataclass
@@ -135,6 +141,25 @@ def detect(
     minima = minima[~is_blocked]
 
     lowest, lowest_patch, lowest_face = _patch_lowest_vertices(mesh, patch)
+    # A small, shallow patch whose lowest point has a lower neighbour grows out of
+    # material printed just before it (a wrinkle on a wall, a fold running into the cloth
+    # below): each layer overhangs the last a little and it prints without support. It
+    # needs no contact and is not a support face. Large or steep patches keep theirs.
+    from_below = _neighbour_min_z(mesh)[lowest] < z[lowest] - MINIMUM_DEPTH
+    n_patches = patch.max() + 1
+    patch_area = np.bincount(patch[support], weights=mesh.face_areas[support], minlength=n_patches)
+    weighted = np.bincount(patch[support], weights=(mesh.face_areas * severity)[support], minlength=n_patches)
+    patch_severity = weighted / np.maximum(patch_area, 1e-12)
+    small = patch_area[lowest_patch] < SMALL_PATCH_FACTOR * params.tip_spacing**2
+    shallow = patch_severity[lowest_patch] < SELF_SUPPORT_SEVERITY
+    self_supporting = lowest_patch[from_below & small & shallow]
+    drop_faces = np.isin(patch, self_supporting) & ~face_force
+    support &= ~drop_faces
+    sample_faces &= ~drop_faces
+    patch[drop_faces] = -1
+    stats_dropped = len(self_supporting)
+    keep_lowest = ~(from_below & small & shallow)
+    lowest, lowest_face = lowest[keep_lowest], lowest_face[keep_lowest]
     keep = ~_buried(mesh.verts[lowest], mesh.face_normals[lowest_face], inside)
     keep &= ~_anchored(mesh.verts[lowest], inside, params.max_bridge)
     lowest, lowest_face = lowest[keep], lowest_face[keep]
@@ -167,6 +192,7 @@ def detect(
     stats = {
         "support_faces": int(support.sum()),
         "patches": int(len(np.unique(patch[patch >= 0]))),
+        "self_supporting_patches": stats_dropped,
         "forced": int(len(forced_pos)),
         "samples": int(len(s_pos)),
     }
@@ -216,13 +242,20 @@ def _local_minima(mesh: MeshData, vertex_normals: np.ndarray) -> np.ndarray:
     reading as minima; a shallow real minimum lies in an overhang patch and
     gets that patch's lowest-point contact instead.
     """
+    z = mesh.verts[:, 2]
+    nbr_min = _neighbour_min_z(mesh)
+    lower = (z < nbr_min - MINIMUM_DEPTH) & np.isfinite(nbr_min)  # isolated vertices excluded
+    return np.flatnonzero(lower & (vertex_normals[:, 2] < 0))
+
+
+def _neighbour_min_z(mesh: MeshData) -> np.ndarray:
+    """Lowest Z among each vertex's edge neighbours (inf for isolated vertices)."""
     edges = mesh.half_edges()  # repeats are harmless for a minimum
     z = mesh.verts[:, 2]
     nbr_min = np.full(len(z), np.inf)
     np.minimum.at(nbr_min, edges[:, 0], z[edges[:, 1]])
     np.minimum.at(nbr_min, edges[:, 1], z[edges[:, 0]])
-    lower = (z < nbr_min - MINIMUM_DEPTH) & np.isfinite(nbr_min)  # isolated vertices excluded
-    return np.flatnonzero(lower & (vertex_normals[:, 2] < 0))
+    return nbr_min
 
 
 def _patch_lowest_vertices(mesh: MeshData, patch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
