@@ -123,11 +123,17 @@ class HANDYCACTUS_OT_generate(Operator):
                 return {"CANCELLED"}
         else:
             support = _existing_support_for(context, targets)
+        wm = context.window_manager
+        wm.progress_begin(0, 100)  # the cursor shows the percentage while it runs
         try:
-            result = pipeline.generate(context, targets, support)
+            result = pipeline.generate(
+                context, targets, support, progress=lambda f, _stage: wm.progress_update(int(100 * f))
+            )
         except (TooManyContacts, pipeline.BelowBed, ValueError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        finally:
+            wm.progress_end()
         overlay.clear_preview()
         info = result.support.handycactus_set
         overlay.refresh()

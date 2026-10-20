@@ -274,3 +274,29 @@ def test_modal_tool_undo_and_redo(support):
     support = bpy.data.objects[tool.support_name]
     assert not (graph_of(support).tip == tip).any() and not (tool.graph.tip == tip).any()
     tool.modal(ctx, _event("ESC", "PRESS", at))
+
+
+def test_clear_unlocked_keeps_locked_trees(support):
+    g = graph_of(support)
+    foot = int(np.flatnonzero(g.kind == G.FOOT)[0])
+    bpy.ops.handycactus.lock_all(locked=False)
+    bpy.ops.handycactus.toggle_lock(node=foot)
+    locked = graph_of(support).locked
+    assert bpy.ops.handycactus.clear_unlocked() == {"FINISHED"}
+    after = graph_of(support)
+    assert after.problems() == [] and after.locked.all() and len(after) == locked.sum()
+    assert bpy.ops.handycactus.clear_unlocked() == {"CANCELLED"}  # nothing left to clear
+
+
+def test_generate_reports_progress(support):
+    seen = []
+    pipeline.generate(
+        bpy.context,
+        support.handycactus_set.target_objects(),
+        support,
+        progress=lambda f, s: seen.append((f, s)),
+    )
+    fractions = [f for f, _ in seen]
+    assert fractions == sorted(fractions) and fractions[0] == 0.0 and fractions[-1] < 1.0
+    assert [s for _, s in seen if s != "route"] == ["read", "detect", "tips", "write", "checks"]
+    assert sum(s == "route" for _, s in seen) > 5  # per level

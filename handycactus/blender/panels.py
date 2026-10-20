@@ -44,6 +44,7 @@ class HANDYCACTUS_PT_main(_HCPanel, Panel):
         row = layout.row(align=True)
         row.prop(settings, "preset", text="")
         row.operator(HANDYCACTUS_OT_apply_preset.bl_idname, text="", icon="LOOP_BACK")
+        row.menu("HANDYCACTUS_MT_user_presets", text="", icon="PRESET")
 
         targets = overlay.current_set(context)
         box = layout.box()
@@ -99,6 +100,7 @@ def _draw_editing(layout, info) -> None:
     row = col.row(align=True)
     row.operator("handycactus.lock_all", text="Lock All", icon="LOCKED").locked = True
     row.operator("handycactus.lock_all", text="Unlock All", icon="UNLOCKED").locked = False
+    col.operator("handycactus.clear_unlocked", icon="TRASH")
     if info.locked_count:
         layout.label(text=f"{info.locked_count} locked tree(s) kept on Generate", icon="LOCKED")
 

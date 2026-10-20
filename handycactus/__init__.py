@@ -6,9 +6,9 @@
 
 
 def _modules():
-    from .blender import edit_tool, export_ops, operators, overlay, panels, props
+    from .blender import edit_tool, export_ops, operators, overlay, panels, props, user_presets
 
-    return (props, overlay, operators, edit_tool, export_ops, panels)
+    return (props, overlay, operators, edit_tool, export_ops, user_presets, panels)
 
 
 def register():

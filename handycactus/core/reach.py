@@ -28,9 +28,12 @@ def subset_tips(tips: Tips, idx: np.ndarray) -> Tips:
     )
 
 
-def route_with_retry(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
+def route_with_retry(tips: Tips, params: Params, obstacles: Obstacles, progress=None) -> RoutingResult:
+    """`progress(fraction)`: the first pass reports 0..0.9, the retry the rest."""
     av = build_avoidance(obstacles, tips, params)
-    first = route(tips, params, obstacles, avoidance=av)
+    first = route(
+        tips, params, obstacles, avoidance=av, progress=(lambda f: progress(0.9 * f)) if progress else None
+    )
     retry = np.intersect1d(first.unreachable_tips, np.flatnonzero(tips.ok))
     if len(retry) == 0 or len(first.graph) == 0:
         return first

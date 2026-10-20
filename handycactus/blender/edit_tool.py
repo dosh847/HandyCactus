@@ -169,6 +169,23 @@ class HANDYCACTUS_OT_lock_all(_EditOperator, Operator):
         return self.run(context, edit)
 
 
+class HANDYCACTUS_OT_clear_unlocked(_EditOperator, Operator):
+    """Delete every tree that is not locked (locked and hand-edited trees stay)"""
+
+    bl_idname = "handycactus.clear_unlocked"
+    bl_label = "Clear Unlocked"
+
+    def execute(self, context):
+        def edit(graph, s):
+            if graph.locked.all():
+                return editing.EditResult(graph, False, "Every tree is locked")
+            kept = editing.locked_part(graph)
+            kept.renumber_trees()
+            return editing.EditResult(kept, True, f"Kept {len(np.unique(kept.tree))} locked tree(s)")
+
+        return self.run(context, edit)
+
+
 class HANDYCACTUS_OT_rebuild_tip(_EditOperator, Operator):
     """Rebuild one tip with its own settings (per-support override)"""
 
@@ -383,6 +400,7 @@ classes = (
     HANDYCACTUS_OT_move_node,
     HANDYCACTUS_OT_toggle_lock,
     HANDYCACTUS_OT_lock_all,
+    HANDYCACTUS_OT_clear_unlocked,
     HANDYCACTUS_OT_rebuild_tip,
     HANDYCACTUS_OT_edit_supports,
 )

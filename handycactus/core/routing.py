@@ -87,6 +87,7 @@ def route(
     obstacles: Obstacles,
     attach_to: SupportGraph | None = None,
     avoidance: Avoidance | str | None = "auto",
+    progress=None,
 ) -> RoutingResult:
     """Route tips to the bed (or the model). With `attach_to`, heads may also end by joining
     a reachable unlocked branch or junction of that existing graph (incremental routing,
@@ -115,7 +116,10 @@ def route(
 
     anchors = _attach_candidates(attach_to)
     attachments: list[tuple[int, int]] = []
+    top = level
     while heads and level > floor + 1e-9:
+        if progress is not None:
+            progress((top - level) / max(top - floor, 1e-9))
         new_level = max(level - params.step_z, floor)
         for h in heads:
             if not h.awake and h.pos[2] > new_level:
