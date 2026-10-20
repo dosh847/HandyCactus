@@ -1,6 +1,7 @@
-# HandyCactus — Tree Supports for FDM in Blender (Spec v0.8)
+# HandyCactus — Tree Supports for FDM in Blender (Spec v0.9)
 
-> Status: v0.8. Bambu-like trees: avoidance grid, merging, load-based radius, landing
+> Status: v0.9. M6 release preparation: user presets, Generate progress, Clear Unlocked, a
+> last-resort routing pass, the user guide and the golden-print kit (2026-10-20). v0.8: Bambu-like trees: avoidance grid, merging, load-based radius, landing
 > limits (2026-10-20). v0.7: riser pads, nearly closed meshes, the lich test sculpt. v0.5: fewer unreachable contacts
 > (self-supporting patches, gap fill, tip relocation, routing retry). v0.4 added the tree shape rules from slicer
 > research; v0.3 landing and manual editing (M4).
@@ -525,6 +526,14 @@ After the first pass, the tips it lost are routed again on their own
 (incremental routing, §6.5). With landing on, this takes the tilted cloak
 from 13 to 7 unreachable.
 
+*v0.8* made the retry merge (§6.4.4). *v0.9* adds a third pass: whatever
+the merging retry still loses is routed one tip at a time. A merged group
+can get trapped the same way twice, while its tips alone fit through. The
+golden-print kit found this on the lich at 50 mm: a 19-tip group near the
+top was trapped in both passes, leaving 49 of 926 contacts (5.3%)
+unreachable. With the third pass it is 14 of 926 (1.5%), at the cost of 13
+more trunks. That is a Blender regression test (≤ 2.5%).
+
 **Results of v0.5** (contacts / unreachable / generate time):
 
 | Model | Before | After |
@@ -578,7 +587,8 @@ Owner feedback on the lich:
   together.
 - **Routing retry (§6.4.3)** now merges too. The 171 tips retried on the
   lich had stood as bundles of lone parallel trunks, which was most of the
-  "many thin branches side by side".
+  "many thin branches side by side". (v0.9 adds a third, unmerged pass for
+  what the merging retry still loses.)
 - `merge_distance` is 6 mm (was 3).
 
 **Radius by load.** `radius_at(params, h, tips)` takes the height rule as
@@ -689,8 +699,10 @@ for confirmation.
   needs detection. **Check Supports** runs the full set.
 - **Regenerate** (Generate on an existing set) keeps locked trees as built
   above; their tip ids are kept, and new tips are numbered after them.
-- **Clear Unlocked** is not built yet. **Clear Supports** deletes the whole
-  set.
+- **Clear Unlocked** (v0.9) deletes every unlocked tree in one undo step and
+  keeps the locked ones. With every tree locked it does nothing and says so.
+  **Clear Supports** deletes the whole set; it does not ask for confirmation,
+  since it can be undone.
 
 ## 8. Overhang heatmap overlay
 
@@ -783,7 +795,15 @@ Every value still needs tuning against test prints (M2/M6).
 
 There is also a *0.4 mm nozzle* variant: it doubles `nozzle_diameter` and
 `min_radius`, and raises the contact diameter to 0.4. Users can save their
-own presets through the standard Blender preset menu (`AddPresetBase`).
+own presets.
+
+**As built in M6** (`blender/user_presets.py`): **My Presets** (the list icon
+next to the preset menu) saves every parameter under a name, loads one, or
+deletes one. A preset is a JSON file `{"name", "params"}` in
+`<extension user dir>/presets`, which extension updates keep. Loading skips
+unknown keys and leaves missing ones as they are, so presets survive parameters
+being added or removed. `AddPresetBase` was not used: it writes Python files into
+Blender's script presets folder, outside the extension's own directory.
 
 ## 10. Printability checks
 
@@ -1008,6 +1028,12 @@ Long operations show progress (`wm.progress_begin/update`) and can be
 cancelled with Esc. They run in a modal timer operator that processes the
 sweep in chunks, so the UI stays responsive.
 
+*As built in M6:* Generate reports progress per stage (read, detect, tips,
+route, write, checks; `pipeline.STAGES`), and routing reports per level of its
+sweep. It still runs in one call, so the UI does not redraw between updates and
+Esc does not cancel. That is acceptable at 5–10 s per mini. The modal timer
+version is in the v2 backlog.
+
 **Tests**
 - Unit tests in `core/`:
   - sampling spacing;
@@ -1023,6 +1049,10 @@ sweep in chunks, so the UI stays responsive.
 - **Golden prints** (manual, before each release): CC0 minis at 32, 42 and
   50 mm, at least one of them multi-part, printed with a 0.2 mm nozzle.
   Record the success rate, snap-off quality and scarring.
+  *As built in M6:* `tools/golden_prints.py` builds the 3MFs from the YKS
+  Miniatures lich (single part, tilted) at all three scales, and
+  `docs/release/GOLDEN_PRINTS.md` is the record sheet. A multi-part CC0 mini
+  can be run through it with `--model`.
 - Slicer import matrix: Bambu Studio, OrcaSlicer, PrusaSlicer, Cura (latest
   stable versions).
 
@@ -1080,7 +1110,15 @@ New questions found during implementation go here:
 | M5 | 3MF and STL export | Slicer import matrix passes |
 | M6 | Presets, docs, golden prints, extensions.blender.org submission | Published v1.0 |
 
+**M6 status** (v0.9 of this spec, extension 0.10.0): user presets, progress,
+Clear Unlocked, the user guide (`docs/USER_GUIDE.md`), the golden-print kit
+(`tools/golden_prints.py`, `docs/release/GOLDEN_PRINTS.md`) and the release
+checklist with the listing text (`docs/release/RELEASE.md`) are done. The golden
+prints, the slicer import matrix and the submission need the owner's printer,
+slicers and account.
+
 **v2 backlog**:
+- Generate as a modal operator: responsive UI, cancel with Esc.
 - Bambu/Orca headless layer check (slicer CLI + parsed warnings).
 - Auto-orientation.
 - Rafts and pads.

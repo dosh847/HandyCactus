@@ -58,3 +58,22 @@ def test_lich_supports_stay_above_the_bed(lich):
     sup = parts[-1]
     assert sup.verts[:, 2].min() == pytest.approx(0.0, abs=1e-4)  # flat on the bed, never under it
     assert parts[0].verts[:, 2].min() == pytest.approx(0.0, abs=1e-4)  # the riser reaches the bed
+
+
+def test_lich_at_50mm_keeps_trapped_groups(lich):
+    # Golden-print kit (tools/golden_prints.py): at 50 mm a 19-tip group merged, got
+    # trapped, and merged the same way again in the retry: 49 of 926 contacts were lost
+    # (5.3%). The last-resort pass routes what is still lost one by one.
+    from handycactus.blender.props import apply_preset
+
+    settings = bpy.context.scene.handycactus
+    try:
+        lich.scale = [50 / 54] * 3
+        apply_preset(settings, "MINI_50")
+        pipeline.place_on_bed(bpy.context, [lich], settings.lift_height)
+        bpy.context.view_layer.update()
+        result = pipeline.generate(bpy.context, [lich])
+        assert result.unreachable <= 0.025 * (result.tips + result.unreachable), result.unreachable
+    finally:
+        lich.scale = (1, 1, 1)
+        apply_preset(settings, "MINI_42")

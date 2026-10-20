@@ -9,13 +9,19 @@ standing on the build plate.
 - Defaults: 42 mm scale minis on a 0.2 mm nozzle
 - License: GPL-3.0-or-later
 
-The full design is in [`docs/SPEC.md`](docs/SPEC.md).
+How to use it: the [user guide](docs/USER_GUIDE.md). The full design is in
+[`docs/SPEC.md`](docs/SPEC.md).
 
 ## Status
 
-**M5: export.** The **HandyCactus** tab in the 3D viewport
-sidebar (N panel) has presets, every parameter and a **Units** setting
-(default: 1 Blender unit = 1 mm, which is how STLs import). Also in the tab:
+**M6: release preparation** (0.10.0). Version 1.0 follows the golden prints and
+the extensions.blender.org review ([release checklist](docs/release/RELEASE.md)).
+
+The **HandyCactus** tab in the 3D viewport sidebar (N panel) has presets, every
+parameter and a **Units** setting (default: 1 Blender unit = 1 mm, which is how
+STLs import). **My Presets** (the list icon next to the preset menu) saves every
+parameter under a name and loads it back; presets live in the extension's user
+folder, so updates keep them. Also in the tab:
 
 - **Place on Bed**: moves the selected meshes together so their lowest point
   sits at the lift height.
@@ -29,7 +35,8 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
 - **Contacts and markers** follow the selection: only selected support sets
   (or sets whose model is selected) show them. The eye button next to the
   heatmap toggle hides them.
-- **Generate Supports**: builds tree supports for the selected meshes, as
+- **Generate Supports**: builds tree supports for the selected meshes (progress
+  shows in the status bar), as
   one `<name>_HC_Supports` object driven by Geometry Nodes. It is made of
   tips, knuckle balls, branches merging into trunks, and flared feet.
   Branches steer around the model to reach the bed, merge into thick trunks
@@ -57,6 +64,7 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
   **Ctrl+Shift+Z** undo and redo, Esc or right click exits. Every edit is
   one undo step and locks its tree.
 - **Lock All / Unlock All**: locked trees are kept when you Generate again.
+  **Clear Unlocked** deletes every unlocked tree and keeps the locked ones.
 - **Export 3MF / Export STL** (in the support set's panel and File ›
   Export): the model and its supports, in mm. 3MF keeps them as one object
   with a part per mesh, so the supports can get their own settings. Choose
@@ -73,7 +81,8 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
 Paint a vertex group named `HC_Force` to force supports on an area, or
 `HC_Block` to keep them off it.
 
-Next: presets, docs, golden prints and the extensions.blender.org release (M6).
+Next: golden prints ([checklist](docs/release/GOLDEN_PRINTS.md)), the slicer
+import matrix, and the extensions.blender.org submission.
 
 ## Layout
 
@@ -85,7 +94,10 @@ handycactus/          the extension (this folder is what gets zipped)
 tests/core/           pytest, no Blender needed
 tests/blender/        pytest inside Blender (the `bpy` module)
 tools/extension.py    validate / build / install-check without a Blender binary
+tools/golden_prints.py  the golden-print 3MFs (32/42/50 mm) and renders
+docs/USER_GUIDE.md
 docs/SPEC.md
+docs/release/         release checklist, listing text, golden-print record
 ```
 
 ## Development
@@ -108,7 +120,7 @@ pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.9.0.zip
+python tools/extension.py install-check dist/handycactus-0.10.0.zip
 ```
 
 ### Installing for development
