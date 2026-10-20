@@ -1,7 +1,8 @@
-# HandyCactus — Tree Supports for FDM in Blender (Spec v0.4)
+# HandyCactus — Tree Supports for FDM in Blender (Spec v0.5)
 
-> Status: v0.4. Adds the tree shape rules from slicer research, tip-aware coverage and
-> undo in the edit tool (2026-10-20). v0.3 added landing and manual editing (M4).
+> Status: v0.5. Fewer unreachable contacts: self-supporting patches, gap fill, tip
+> relocation and a routing retry (2026-10-20). v0.4 added the tree shape rules from slicer
+> research; v0.3 landing and manual editing (M4).
 
 HandyCactus is a Blender extension that generates **resin-style tree supports
 for FDM printing**: thin, tapered tips that touch the model at points and snap
@@ -245,6 +246,19 @@ point is inside the other part.
 
    Forced contacts are never dropped by the bridging step. Minima win over
    patch-lowest points when deduplicating.
+
+   **Self-supporting patches (v0.5).** A patch whose lowest vertex has a
+   lower neighbour grows out of material printed just before it: each layer
+   overhangs the last a little. If it is also small and shallow, it prints
+   without support. It gets no `PATCH_LOWEST` contact and leaves the support
+   mask (`stats["self_supporting_patches"]`).
+   - Small: area below `0.25 × tip_spacing²`, about 0.56 mm².
+   - Shallow: area-weighted severity below 0.5 (about 67° from vertical).
+   - Large or steep patches keep their contact; true islands are `MINIMUM`
+     contacts and are not affected.
+   - Sculpted wrinkles produce thousands of such patches. On the cloaked
+     test figure, 2,631 of 2,724 patches qualified. Their rim contacts were
+     what failed to get tips (below), and detection time fell by half.
 3. **Bridging** (revised in M3): a sample is dropped as bridgeable only
    when it is held from **two sides**.
    - Just below it there must be model material in two directions at least
@@ -281,6 +295,23 @@ point is inside the other part.
    step reports them. Each target uses its own vertex groups.
 5. **Merge near-duplicates**: contacts closer than `0.5 × tip_spacing` are
    merged into one. Islands win.
+6. **Gap fill (v0.5).** Coverage uses the heatmap's rule (§8): a contact
+   within `1.5 × tip_spacing` and at most one layer above the face. Poisson
+   candidates are accepted lowest first, with heights rounded to 0.1 µm so
+   float noise cannot reorder them. After sampling and bridging, each round
+   (up to 8):
+   - takes the lowest faces no contact covers, thinned to one per spacing;
+   - points that are neither bridged nor buried become contacts;
+   - the others mark the faces within `0.5 × tip_spacing` (same height
+     rule) as bridged.
+
+   Bridged faces need no support and leave the support mask, so the
+   heatmap and the coverage check do not report them. Uncovered overhang on
+   the five test models is 0–0.3% (was 1.7–5.5%).
+   - Blender triangulates displaced quads differently between runs, so
+     detection results vary from run to run even with a fixed seed. Before
+     the gap fill, the organic fixture's coverage moved between 3.2% and
+     5.5%.
 
 ### 6.3 Tip construction
 For each contact `p` with surface normal `n`:
@@ -310,6 +341,23 @@ For each contact `p` with surface normal `n`:
 - The knuckle must not overlap another knuckle. When two do, the lower tip
   is lengthened along its own axis by exactly the amount that gives
   `2 × knuckle radius + 0.01 mm` between them (solved, not estimated).
+
+### 6.3.1 Second chances for failed tips (v0.5, `core/relocate.py`)
+A contact marks a spot of overhang to hold up, not an exact point. For each
+contact whose tip cannot be built:
+1. **Covered**: a working tip within `0.5 × tip_spacing`, and no more than
+   one layer above, already holds the spot up. The failed contact is
+   dropped.
+2. **Moved**: otherwise, up to 24 nearby support faces (within the same
+   radius, normal within 60° of the contact's) are tried lowest first. The
+   contact moves to the first face centroid that gets a tip.
+3. Otherwise it stays unreachable.
+
+**Why.** On a cloaked test figure (body, axe, rib bars, straps, a flared
+cape with deep folds and fine wrinkles), 14% of contacts were unreachable.
+62 of the 65 failed tips were `PATCH_LOWEST` contacts on the rims of tiny
+wrinkle patches, where the patch meets a wall and no tip cone fits.
+Routing lost only 2.
 
 ### 6.4 Branch routing: greedy cone merging
 The approach follows Meshmixer and PrusaSlicer organic supports.
@@ -465,6 +513,27 @@ only lands when it has no free path to the bed.
 Measured on the three synthetic organic minis (layered shells, 276–449
 tips): 5, 8 and 14 unreachable tips (1–5%), with 16, 1 and 0 landings.
 Generation takes 1.5–1.9 s.
+
+### 6.4.3 Routing retry (v0.5, `core/reach.py`)
+A stuck head drops its whole tree (§6.4). On the cloaked figure with
+landing off, about 40% of routing losses were tips that merged into a
+branch that later got trapped.
+
+After the first pass, the tips it lost are routed again on their own
+(`merge_distance` 0). They may also end by joining any tree that made it
+(incremental routing, §6.5). With landing on, this takes the tilted cloak
+from 13 to 7 unreachable.
+
+**Results of v0.5** (contacts / unreachable / generate time):
+
+| Model | Before | After |
+|---|---|---|
+| Cloaked figure | 486 / 67 (14%) / 9.4 s | 271 / 3 (1%) / 4.0 s |
+| Cloaked, tilted 25° | 797 / 13 / 19 s | 474 / 5 / 9.2 s |
+| Organic 1–3 | 5, 0, 14 unreachable | 0, 0, 0 |
+
+The figure is a Blender regression test (`tests/blender/test_cloak.py`,
+≤ 3% unreachable).
 
 ### 6.5 Incremental routing
 `route(..., attach_to=graph)` is used for:

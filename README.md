@@ -34,8 +34,10 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
   tips, knuckle balls, branches merging into trunks, and flared feet.
   Branches are smoothed and thicken with height below their tallest tip, as
   in OrcaSlicer and PrusaSlicer organic supports
-  ([notes](docs/research/tree-supports.md)). Run it again to rebuild the set
-  in place. Red dots mark contacts that could
+  ([notes](docs/research/tree-supports.md)). A contact with no room for a
+  tip moves to the nearest spot on the same overhang that has room. Tiny
+  self-supporting wrinkles get no contacts, and detection fills any gap the
+  heatmap would show. Run it again to rebuild the set in place. Red dots mark contacts that could
   not reach the bed.
 - **Clear Supports**: deletes the selected support sets.
 - **Check Supports**: printability checks (also run after every Generate).
@@ -91,7 +93,7 @@ pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.5.1.zip
+python tools/extension.py install-check dist/handycactus-0.6.0.zip
 ```
 
 ### Installing for development
