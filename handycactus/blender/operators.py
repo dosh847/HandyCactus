@@ -130,7 +130,7 @@ class HANDYCACTUS_OT_generate(Operator):
             return {"CANCELLED"}
         overlay.clear_preview()
         info = result.support.handycactus_set
-        overlay.set_findings(info.findings)
+        overlay.refresh()
         errors, warnings = info.counts()
         msg = f"{result.tips} tips on {result.trees} trees in {result.seconds:.2f} s"
         if result.unreachable:
@@ -164,7 +164,7 @@ class HANDYCACTUS_OT_clear_supports(Operator):
         supports = selected_supports(context)
         for ob in supports:
             pipeline.remove_support(ob)
-        overlay.set_findings(None)
+        overlay.refresh()
         self.report({"INFO"}, f"Removed {len(supports)} support set(s)")
         return {"FINISHED"}
 
@@ -184,7 +184,7 @@ class HANDYCACTUS_OT_check_supports(Operator):
         support = selected_supports(context)[0]
         pipeline.check_support(context, support)
         info = support.handycactus_set
-        overlay.set_findings(info.findings)
+        overlay.refresh()
         errors, warnings = info.counts()
         self.report({"WARNING"} if errors else {"INFO"}, f"{errors} error(s), {warnings} warning(s)")
         return {"FINISHED"}

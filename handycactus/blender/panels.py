@@ -57,10 +57,12 @@ class HANDYCACTUS_PT_main(_HCPanel, Panel):
         box.operator(HANDYCACTUS_OT_place_on_bed.bl_idname, icon="TRIA_DOWN_BAR")
 
         box = layout.box()
-        box.prop(settings, "show_heatmap", icon="SHADING_SOLID")
+        row = box.row(align=True)
+        row.prop(settings, "show_heatmap", icon="SHADING_SOLID")
+        row.prop(settings, "show_markers", text="", icon="HIDE_OFF" if settings.show_markers else "HIDE_ON")
         if settings.show_heatmap:
             text = f"{overlay.state.face_count} faces need support"
-            if overlay.state.preview is not None and overlay.state.gap_face_count:
+            if overlay.state.gap_face_count:
                 text += f", {overlay.state.gap_face_count} uncovered"
             box.label(text=text)
         row = box.row(align=True)

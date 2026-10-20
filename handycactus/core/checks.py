@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .graph import CONTACT, FOOT, JUNCTION, KNUCKLE, LANDING, SupportGraph
-from .heatmap import estimate_support_faces, within
+from .heatmap import COVERAGE_FACTOR, covered, estimate_support_faces
 from .mesh_data import MeshData, connected_components
 from .params import Params
 from .spatial import Obstacles
@@ -27,7 +27,6 @@ _SEVERITY_ORDER = {ERROR: 0, WARNING: 1, INFO: 2}
 
 STEEP_TOLERANCE_DEG = 5.0
 SLENDERNESS_LIMIT = 40.0
-COVERAGE_FACTOR = 1.5  # gap = farther than this × tip_spacing from every contact
 COLLISION_SAMPLE_MM = 0.5
 
 
@@ -238,7 +237,8 @@ def check_landings(graph: SupportGraph) -> list[Finding]:
 def check_coverage(
     graph: SupportGraph, params: Params, mesh: MeshData, support_faces: np.ndarray | None = None
 ) -> list[Finding]:
-    """Overhang regions with no contact within COVERAGE_FACTOR × tip_spacing."""
+    """Overhang regions with no contact within COVERAGE_FACTOR × tip_spacing at or below
+    their height (a tip does not support anything below it)."""
     if support_faces is None:
         support_faces = estimate_support_faces(mesh, params)
     faces = np.flatnonzero(support_faces)
@@ -247,7 +247,7 @@ def check_coverage(
     contact = np.flatnonzero(graph.kind == CONTACT)
     # Contact nodes sit `penetration` inside the model; measure from the surface point.
     surface = graph.pos[contact] + graph.dir[contact] * params.penetration
-    gap = ~within(mesh.face_centroids[faces], surface, COVERAGE_FACTOR * params.tip_spacing)
+    gap = ~covered(mesh.face_centroids[faces], surface, params)
     gap_faces = faces[gap]
     if len(gap_faces) == 0:
         return []

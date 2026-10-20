@@ -8,7 +8,7 @@ import pytest
 bpy = pytest.importorskip("bpy")
 
 import handycactus  # noqa: E402
-from handycactus.blender import edit_tool, pipeline  # noqa: E402
+from handycactus.blender import edit_tool, overlay, pipeline  # noqa: E402
 from handycactus.blender.spatial_bvh import first_hit  # noqa: E402
 from handycactus.core import graph as G  # noqa: E402
 
@@ -126,7 +126,7 @@ class _SimulatedTool:
     """The modal tool's methods on a plain object, driven by synthetic events."""
 
 
-for _name in ("_support", "_reload", "_finish", "_hovered", "_ray", "_feedback", "_edit", "modal"):
+for _name in ("_support", "_reload", "_finish", "_hovered", "_ray", "_feedback", "_undo", "_edit", "modal"):
     setattr(_SimulatedTool, _name, getattr(edit_tool.HANDYCACTUS_OT_edit_supports, _name))
 
 
@@ -169,10 +169,18 @@ class _FakeContext:
         return getattr(bpy.context, name)
 
 
-def _event(type_, value="PRESS", at=(0, 0), ctrl=False):
+def _event(type_, value="PRESS", at=(0, 0), ctrl=False, shift=False):
     from types import SimpleNamespace
 
-    return SimpleNamespace(type=type_, value=value, ctrl=ctrl, mouse_region_x=at[0], mouse_region_y=at[1])
+    return SimpleNamespace(
+        type=type_,
+        value=value,
+        ctrl=ctrl,
+        shift=shift,
+        oskey=False,
+        mouse_region_x=at[0],
+        mouse_region_y=at[1],
+    )
 
 
 def _pixel(context, point_bu):
@@ -187,13 +195,18 @@ def _pixel(context, point_bu):
     return tuple(px[0])
 
 
-def test_modal_tool_add_drag_lock_delete(support):
+def _start_tool(support):
     ctx = _camera_below()
     tool = _SimulatedTool()
     tool.session = pipeline.EditSession(bpy.context, support)
     pipeline.set_active_session(tool.session)
     tool.support_name, tool.hover, tool.drag = support.name, -1, None
     tool._reload(ctx)
+    return ctx, tool
+
+
+def test_modal_tool_add_drag_lock_delete(support):
+    ctx, tool = _start_tool(support)
     tips_before = int((tool.graph.kind == G.CONTACT).sum())
 
     # Click an empty spot of the underside (no support node under the cursor): a tip is added.
@@ -237,3 +250,27 @@ def test_modal_tool_add_drag_lock_delete(support):
     # Esc ends the tool.
     assert tool.modal(ctx, _event("ESC", "PRESS", at)) == {"FINISHED"}
     assert pipeline._active_session is None
+
+
+def test_modal_tool_undo_and_redo(support):
+    bpy.ops.ed.undo_push(message="Generate")
+    ctx, tool = _start_tool(support)
+    start = graph_of(support)
+    tip = int(start.tip[start.kind == G.CONTACT][0])
+    at = _pixel(ctx, start.pos[(start.tip == tip) & (start.kind == G.CONTACT)][0])
+    tool.modal(ctx, _event("MOUSEMOVE", "NOTHING", at))
+    tool.modal(ctx, _event("LEFTMOUSE", "PRESS", at, ctrl=True))
+    deleted = graph_of(support)
+    assert not (deleted.tip == tip).any()
+
+    overlay.state.geometry_dirty = False
+    tool.modal(ctx, _event("Z", "PRESS", at, ctrl=True))
+    assert overlay.state.geometry_dirty  # the undo handler asks the overlay to redraw from the scene
+    support = bpy.data.objects[tool.support_name]  # undo reloads the data
+    assert (graph_of(support).tip == tip).any() and (tool.graph.tip == tip).any()
+    assert len(tool.graph) == len(start)
+
+    tool.modal(ctx, _event("Z", "PRESS", at, ctrl=True, shift=True))
+    support = bpy.data.objects[tool.support_name]
+    assert not (graph_of(support).tip == tip).any() and not (tool.graph.tip == tip).any()
+    tool.modal(ctx, _event("ESC", "PRESS", at))

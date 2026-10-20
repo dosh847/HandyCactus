@@ -9,6 +9,7 @@ bpy = pytest.importorskip("bpy")
 import handycactus  # noqa: E402
 from handycactus.blender import graph_io, overlay, pipeline  # noqa: E402
 from handycactus.core import graph as G  # noqa: E402
+from handycactus.core import heatmap  # noqa: E402
 from handycactus.core.params import Params  # noqa: E402
 
 
@@ -138,7 +139,7 @@ def test_unreachable_contacts_are_marked(scene):
     bpy.ops.handycactus.generate()
     (support,) = supports_in_scene()
     assert support.handycactus_set.unreachable_count > 0
-    assert overlay.state.markers is not None and len(overlay.state.markers) > 0
+    assert overlay.state.marker_count > 0
 
 
 def test_generate_refuses_below_the_bed(scene):
@@ -188,7 +189,7 @@ def test_check_and_frame_unreachable_findings(scene):
     info = support.handycactus_set
     unreachable = [f for f in info.findings if f.code == "unreachable"]
     assert len(unreachable) == info.unreachable_count > 0
-    assert overlay.state.markers is not None and len(overlay.state.markers) == len(info.findings)
+    assert overlay.state.marker_count == len(info.findings)
     # Errors are listed first; framing one puts the cursor on it.
     assert info.findings[0].severity == "ERROR"
     assert bpy.ops.handycactus.frame_finding(index=0) == {"FINISHED"}
@@ -196,7 +197,7 @@ def test_check_and_frame_unreachable_findings(scene):
     assert cursor == pytest.approx(tuple(info.findings[0].location), abs=1e-4)
     select_only(support)
     bpy.ops.handycactus.clear_supports()
-    assert overlay.state.markers is None
+    assert overlay.state.marker_count == 0
 
 
 def test_trapped_branches_land_on_the_model(scene):
@@ -218,3 +219,48 @@ def test_trapped_branches_land_on_the_model(scene):
     # its tip sunk `penetration` into it.
     v = evaluated_verts(support)
     assert v[:, 2].min() == pytest.approx(1.0 - Params().penetration, abs=0.05)
+
+
+def test_markers_follow_the_selection_and_toggle(scene):
+    plate = add_box(12, (0, 0, 0.5), "plate", scale=(1, 1, 1 / 12))
+    post = add_box(2, (0, 0, 3.5), "post", scale=(1, 1, 2.5))
+    canopy = add_box(8, (0, 0, 6.5), "canopy", scale=(1, 1, 1 / 8))
+    scene.handycactus.land_on_model = False
+    select_only(plate, post, canopy)
+    bpy.ops.handycactus.generate()
+    (support,) = supports_in_scene()
+    shown = len(support.handycactus_set.findings)
+    assert overlay.state.marker_count == shown > 0  # targets selected: their set's markers
+    bpy.ops.object.select_all(action="DESELECT")
+    overlay._tick()
+    assert overlay.state.marker_count == 0  # nothing selected: nothing shown
+    select_only(support)
+    overlay._tick()
+    assert overlay.state.marker_count == shown
+    scene.handycactus.show_markers = False
+    assert overlay.state.marker_count == 0
+    scene.handycactus.show_markers = True
+    assert overlay.state.marker_count == shown
+
+
+def test_support_tips_colour_the_heatmap(scene):
+    box = add_box(8, (0, 0, 14), "box")
+    select_only(box)
+    bpy.ops.handycactus.generate()
+    (support,) = supports_in_scene()
+    select_only(support)  # the set's targets get the heatmap, coloured by its tips
+    scene.handycactus.show_heatmap = True
+    colors = overlay.state.heat_colors[::3]
+    covered = np.all(np.isclose(colors, heatmap.COVERED), axis=1)
+    assert overlay.state.face_count > 0 and covered.mean() > 0.95
+    assert overlay.state.gap_face_count == (~covered).sum()
+
+    # Without tips the underside is uncovered (the tips cover only what is above them).
+    bpy.ops.handycactus.lock_all(locked=False)
+    graph = pipeline.read_support_graph(bpy.context, support)
+    tip = int(graph.tip[graph.kind == G.CONTACT][0])
+    for t in np.unique(graph.tip[graph.kind == G.CONTACT]):
+        bpy.ops.handycactus.delete_tip(tip=int(t))
+    overlay._tick()
+    assert tip >= 0 and overlay.state.gap_face_count == overlay.state.face_count
+    scene.handycactus.show_heatmap = False

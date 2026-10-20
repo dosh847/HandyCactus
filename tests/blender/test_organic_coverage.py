@@ -59,7 +59,8 @@ def test_overhangs_are_covered(organic):
     assert stats["samples_after_bridging"] >= 0.5 * stats["samples"], stats
     params = settings_to_params(bpy.context.scene.handycactus)
     h = heatmap.build(run.mesh, params, run.result.contacts.positions, run.result.support_faces)
-    assert h.gap_face_count <= 0.12 * h.face_count, (h.gap_face_count, h.face_count)
+    # Contacts cover faces near them and at or above their height (one layer of slack).
+    assert h.gap_face_count <= 0.05 * h.face_count, (h.gap_face_count, h.face_count)
 
 
 def test_most_contacts_reach_the_bed(organic):

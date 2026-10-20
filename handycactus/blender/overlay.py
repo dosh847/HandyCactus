@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Viewport overlay: overhang heatmap and contact preview (spec section 8).
+"""Viewport overlay: overhang heatmap, contact preview and check markers (spec section 8).
 
-Until M2 creates support sets, the heatmap follows the selected mesh
-objects. Recomputation happens on a 0.25 s timer (at most 4 times a second),
-never inside the draw callback, which only uploads finished arrays.
+Everything follows the selection. The heatmap covers the selected meshes plus the
+targets of selected support sets; a support set counts as selected when it or one of
+its targets is. Check markers and previewed contacts are shown only for selected sets
+(Show Markers turns them off), and the tips of a selected support set colour the faces
+they cover. Recomputation happens on a 0.25 s timer (at most 4 times a second), never
+inside the draw callback, which only uploads finished arrays.
 """
 
 from __future__ import annotations
@@ -15,9 +18,11 @@ import numpy as np
 from bpy.app.handlers import persistent
 
 from ..core import detection, heatmap
+from ..core.graph import CONTACT
+from . import pipeline
 from .mesh_io import mesh_targets, scene_mm_per_bu
 from .pipeline import read_set
-from .props import settings_to_params
+from .props import is_support, settings_to_params
 
 TICK_SECONDS = 0.25
 # The heatmap lies exactly on the surface; pull it toward the camera by this
@@ -45,8 +50,7 @@ class _State:
     heat_positions: np.ndarray | None = None  # Blender units
     heat_colors: np.ndarray | None = None
     point_positions: np.ndarray | None = None
-    markers: np.ndarray | None = None  # (M, 3) mm: check findings of the shown support set
-    marker_colors: np.ndarray | None = None
+    marker_count: int = 0  # check markers currently shown
     edit_points: np.ndarray | None = None  # (E, 3) mm: Edit Supports hover / drag feedback
     edit_colors: np.ndarray | None = None
     point_colors: np.ndarray | None = None
@@ -92,18 +96,15 @@ def set_edit_feedback(hover_mm, drag_mm) -> None:
         _stop_if_idle()
 
 
-def set_findings(findings) -> None:
-    """Markers for check findings (red errors, orange warnings); an empty list clears them."""
-    findings = list(findings or [])
-    if findings:
-        state.markers = np.array([tuple(f.location) for f in findings], dtype=np.float64).reshape(-1, 3)
-        state.marker_colors = np.array([SEVERITY_COLORS[f.severity] for f in findings])
+def refresh() -> None:
+    """A support set changed (generated, edited, checked, removed): redraw from the scene."""
+    state.dirty = state.geometry_dirty = True
+    if _wanted(bpy.context.scene):
         _ensure_running()
+        _rebuild()
     else:
-        state.markers = state.marker_colors = None
-    state.dirty = True
-    _rebuild()
-    _stop_if_idle()
+        _rebuild()
+        _stop_if_idle()
 
 
 def clear_preview() -> None:
@@ -127,20 +128,22 @@ def invalidate() -> None:
 
 
 def sync(scene) -> None:
-    """Start or stop the overlay to match the scene's toggle."""
-    if scene.handycactus.show_heatmap:
+    """Start or stop the overlay to match the scene's toggles."""
+    if _wanted(scene):
         state.dirty = state.geometry_dirty = True
         _ensure_running()
         _rebuild()
     else:
         state.heat_positions = state.heat_colors = None
-        state.face_count = state.gap_face_count = 0
+        state.point_positions = state.point_colors = None
+        state.face_count = state.gap_face_count = state.marker_count = 0
         state.batches_stale = True
         _tag_redraw()
         _stop_if_idle()
 
 
 def current_set(context=None) -> list:
+    """The selected target meshes (supports objects excluded)."""
     context = context or bpy.context
     view_layer = getattr(context, "view_layer", None)
     if view_layer is None:
@@ -148,41 +151,95 @@ def current_set(context=None) -> list:
     return mesh_targets(view_layer.objects.selected)
 
 
+def shown_supports(context=None) -> list:
+    """Support sets that are selected, or whose targets are selected (by name)."""
+    context = context or bpy.context
+    view_layer = getattr(context, "view_layer", None)
+    if view_layer is None:
+        return []
+    selected = {ob.name for ob in view_layer.objects.selected if ob is not None}
+    if not selected:
+        return []
+    out = []
+    # scene.objects, not view_layer.objects: a set made by this operator is not in the
+    # view layer's list until the next view layer update.
+    for ob in context.scene.objects:
+        if not is_support(ob):
+            continue
+        targets = {t.name for t in ob.handycactus_set.target_objects()}
+        if ob.name in selected or targets & selected:
+            out.append(ob)
+    return sorted(out, key=lambda ob: ob.name)
+
+
+def heat_set(context=None) -> list:
+    """Meshes the heatmap covers: the selected targets and the targets of shown sets."""
+    objects = {ob.name: ob for ob in current_set(context)}
+    for support in shown_supports(context):
+        for ob in support.handycactus_set.target_objects():
+            objects.setdefault(ob.name, ob)
+    return mesh_targets(objects.values())
+
+
+def _show_markers(scene) -> bool:
+    return scene is not None and scene.handycactus.show_markers
+
+
 def _has_points() -> bool:
-    return (
-        state.preview is not None
-        or (state.markers is not None and len(state.markers) > 0)
-        or state.edit_points is not None
-    )
+    return state.preview is not None or state.edit_points is not None
 
 
 def _enabled(scene) -> bool:
     return scene is not None and scene.handycactus.show_heatmap
 
 
-def _signature(scene, objects) -> tuple:
+def _wanted(scene) -> bool:
+    """Should the overlay run: heatmap on, a preview or edit feedback, or markers to show."""
+    if _enabled(scene) or _has_points():
+        return True
+    return _show_markers(scene) and any(is_support(ob) for ob in scene.objects)
+
+
+def _signature(scene, context=None) -> tuple:
     p = settings_to_params(scene.handycactus)
     return (
-        tuple(ob.name for ob in objects),
+        tuple(ob.name for ob in heat_set(context)),
+        tuple(ob.name for ob in shown_supports(context)),
         p.overhang_angle,
         p.bed_ignore_height,
         p.tip_spacing,
         scene_mm_per_bu(scene),
+        scene.handycactus.show_markers,
     )
+
+
+def _support_tips(support, scale) -> np.ndarray:
+    """Surface points (mm) of a support set's contact tips."""
+    graph = pipeline.read_support_graph_scaled(support, scale)
+    contact = graph.kind == CONTACT
+    params = support.handycactus_set.params()
+    penetration = params.penetration if params is not None else 0.0
+    return graph.pos[contact] + graph.dir[contact] * penetration
 
 
 def _rebuild() -> None:
     context = bpy.context
     scene = context.scene
-    objects = current_set(context)
-    state.signature = _signature(scene, objects)
+    if scene is None:
+        return
+    objects = heat_set(context)
+    supports = shown_supports(context)
+    names = [ob.name for ob in objects]
+    state.signature = _signature(scene, context)
     geometry_dirty = state.geometry_dirty
     state.dirty = state.geometry_dirty = False
     scale = scene_mm_per_bu(scene)
 
     preview = state.preview
+    # A preview is shown while its meshes are part of the selection.
+    preview_shown = preview is not None and bool(preview.names) and set(preview.names) <= set(names)
     positions, colors = [], []
-    if preview is not None:
+    if preview_shown and _show_markers(scene):
         c = preview.result.contacts
         blocked = preview.result.blocked_islands
         positions += [c.positions, blocked]
@@ -190,9 +247,14 @@ def _rebuild() -> None:
             np.where(c.is_island[:, None], ISLAND_COLOR, SAMPLE_COLOR),
             np.tile(BLOCKED_COLOR, (len(blocked), 1)),
         ]
-    if state.markers is not None and len(state.markers):
-        positions.append(state.markers)
-        colors.append(state.marker_colors)
+    state.marker_count = 0
+    if _show_markers(scene):
+        for support in supports:
+            findings = support.handycactus_set.findings
+            if len(findings):
+                positions.append(np.array([tuple(f.location) for f in findings], dtype=np.float64))
+                colors.append(np.array([SEVERITY_COLORS.get(f.severity, ERROR_COLOR) for f in findings]))
+                state.marker_count += len(findings)
     if positions:
         state.point_positions = np.concatenate(positions) / scale
         state.point_colors = np.concatenate(colors)
@@ -207,14 +269,19 @@ def _rebuild() -> None:
             state.mesh = read_set(context, objects)
             state.mesh_key = mesh_key
         mesh = state.mesh
-        same_set = preview is not None and preview.names == [ob.name for ob in objects]
-        contacts = preview.result.contacts.positions if same_set else None
-        # With a preview of this set, use detection's face mask (it leaves out buried faces).
-        mask = (
-            preview.result.support_faces
-            if same_set and len(preview.result.support_faces) == len(mesh.tris)
-            else None
-        )
+        same_set = preview is not None and preview.names == names
+        contacts = mask = None
+        if same_set:
+            # Detection's face mask leaves out buried faces.
+            contacts = preview.result.contacts.positions
+            mask = preview.result.support_faces
+        elif supports:
+            # The tips of the shown sets: each covers the faces near it and above it.
+            contacts = np.concatenate([_support_tips(s, scale) for s in supports]).reshape(-1, 3)
+            if len(supports) == 1:
+                mask = pipeline.support_faces_for(supports[0], names)
+        if mask is not None and len(mask) != len(mesh.tris):
+            mask = None
         h = heatmap.build(mesh, settings_to_params(scene.handycactus), contacts, mask)
         state.heat_positions = h.positions / scale
         state.heat_colors = h.colors
@@ -229,11 +296,11 @@ def _rebuild() -> None:
 
 def _tick():
     scene = bpy.context.scene
-    if not (_enabled(scene) or _has_points()):
+    if scene is None or not _wanted(scene):
         state.timer_running = False
         _stop_if_idle(from_timer=True)
         return None  # returning None unregisters this timer
-    if state.dirty or _signature(scene, current_set()) != state.signature:
+    if state.dirty or _signature(scene) != state.signature:
         _rebuild()
     return TICK_SECONDS
 
@@ -243,10 +310,14 @@ def _on_depsgraph_update(scene, depsgraph):
     if not state.timer_running:
         return
     names = set(state.signature[0]) if state.signature else set()
+    supports = set(state.signature[1]) if state.signature else set()
     if state.preview is not None:
         names |= set(state.preview.names)
     for update in depsgraph.updates:
         ob = update.id
+        if isinstance(ob, bpy.types.Object) and ob.name in supports and update.is_updated_geometry:
+            state.dirty = True  # edited supports: new tips colour the heatmap
+            continue
         if isinstance(ob, bpy.types.Object) and ob.name in names:
             if update.is_updated_geometry or update.is_updated_transform:
                 state.dirty = state.geometry_dirty = True
@@ -255,6 +326,15 @@ def _on_depsgraph_update(scene, depsgraph):
                     state.preview = None
                     state.point_positions = state.point_colors = None
                 return
+
+
+@persistent
+def _on_undo_redo(scene, *_args):
+    """Undo and redo reload the scene data: supports, findings and meshes may all differ."""
+    state.dirty = state.geometry_dirty = True
+    state.mesh = None
+    if scene is not None and _wanted(scene):
+        _ensure_running()
 
 
 @persistent
@@ -277,7 +357,7 @@ def _ensure_running() -> None:
 
 def _stop_if_idle(from_timer: bool = False) -> None:
     scene = bpy.context.scene
-    if _enabled(scene) or _has_points():
+    if scene is not None and _wanted(scene):
         return
     if state.draw_handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(state.draw_handle, "WINDOW")
@@ -409,6 +489,7 @@ def _draw_overlay_popover(self, context):
     layout = self.layout
     layout.label(text="HandyCactus")
     layout.prop(context.scene.handycactus, "show_heatmap", text="Overhang Heatmap")
+    layout.prop(context.scene.handycactus, "show_markers", text="Contacts and Markers")
 
 
 def contact_summary(run) -> str:
@@ -420,6 +501,8 @@ def contact_summary(run) -> str:
 def register():
     bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
     bpy.app.handlers.load_post.append(_on_load_post)
+    bpy.app.handlers.undo_post.append(_on_undo_redo)
+    bpy.app.handlers.redo_post.append(_on_undo_redo)
     bpy.types.VIEW3D_PT_overlay.append(_draw_overlay_popover)
 
 
@@ -428,6 +511,8 @@ def unregister():
     for handlers, fn in (
         (bpy.app.handlers.depsgraph_update_post, _on_depsgraph_update),
         (bpy.app.handlers.load_post, _on_load_post),
+        (bpy.app.handlers.undo_post, _on_undo_redo),
+        (bpy.app.handlers.redo_post, _on_undo_redo),
     ):
         if fn in handlers:
             handlers.remove(fn)

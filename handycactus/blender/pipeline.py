@@ -175,6 +175,7 @@ def generate(context, objects, support=None) -> GenerateResult:
     unreachable = built.surface[routed.unreachable_tips]
     _store_stats(info, graph, unreachable)
     info.set_findings(checks.run_checks(graph, params, mesh, obstacles, unreachable, found.support_faces))
+    remember_support_faces(support, objects, found.support_faces)
     info.seconds = time.perf_counter() - start
     return GenerateResult(
         support=support,
@@ -299,6 +300,7 @@ def check_support(context, support) -> list:
         obstacles = BVHObstacles(trees)
         # Detection's face mask (not the angle-only estimate) so buried faces are not gaps.
         support_faces = detection.detect(mesh, params, _testers_from(trees, mesh)).support_faces
+        remember_support_faces(support, objects, support_faces)
     findings = checks.run_checks(graph, params, mesh, obstacles, info.unreachable_points(), support_faces)
     info.set_findings(findings)
     return findings
@@ -306,3 +308,22 @@ def check_support(context, support) -> list:
 
 def read_support_graph(context, support):
     return graph_io.read_graph(support.data, scene_mm_per_bu(context.scene))
+
+
+def read_support_graph_scaled(support, scale: float):
+    return graph_io.read_graph(support.data, scale)
+
+
+# Detection's face mask per support set (by name), with the target names it was made for.
+# In memory only: after a reload the heatmap falls back to the angle-only estimate.
+_support_faces: dict[str, tuple[list[str], np.ndarray]] = {}
+
+
+def remember_support_faces(support, objects, mask: np.ndarray) -> None:
+    _support_faces[support.name] = ([ob.name for ob in objects], mask)
+
+
+def support_faces_for(support, names: list[str]) -> np.ndarray | None:
+    """The remembered face mask of a support set, if it was made for exactly `names`."""
+    entry = _support_faces.get(support.name)
+    return entry[1] if entry is not None and entry[0] == list(names) else None

@@ -47,3 +47,22 @@ def test_within_matches_brute_force():
     targets = rng.uniform(-20, 20, (200, 3))
     d = np.linalg.norm(pts[:, None] - targets[None], axis=2).min(axis=1)
     assert np.array_equal(heatmap.within(pts, targets, 2.5), d <= 2.5)
+
+
+def test_tips_cover_only_faces_at_or_above_them():
+    # Two ceilings: z = 3 and z = 5, overlapping in plan; one contact on the upper one.
+    mesh = combine([voxels([((0, 0, 3), (2, 2, 4)), ((0, 0, 5), (2, 2, 6))])])
+    h = heatmap.build(mesh, Params(), contacts=np.array([[1.0, 1.0, 5.0]]))
+    face_z = h.positions.reshape(-1, 3, 3)[:, :, 2].mean(axis=1)
+    face_colors = h.colors[::3]
+    upper, lower = face_z > 4.5, face_z < 3.5
+    assert np.all(face_colors[upper] == heatmap.COVERED)
+    assert np.all(face_colors[lower] == heatmap.GAP)  # 2 mm below the tip: not supported by it
+
+
+def test_within_below_limit():
+    pts = np.array([[0.0, 0, 0], [0, 0, 1]])
+    targets = np.array([[0.0, 0, 0.5]])
+    assert list(heatmap.within(pts, targets, 1.0, below=0.0)) == [False, True]
+    near = Params().with_values({"tip_spacing": 1.0})
+    assert list(heatmap.covered(pts, targets, near)) == [False, True]

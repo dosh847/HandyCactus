@@ -313,6 +313,10 @@ def _poisson_samples(mesh, faces_mask, spacing, seeds, rng):
     su = np.sqrt(u)
     a, b, c = (mesh.verts[mesh.tris[pick, i]] for i in range(3))
     pts = (1 - su)[:, None] * a + (su * (1 - v))[:, None] * b + (su * v)[:, None] * c
+    # Lowest candidates first: a tip only holds up what is printed after it (at or above
+    # its height), so contacts belong at the bottom of each region, with the rest above.
+    order = np.argsort(pts[:, 2], kind="stable")
+    pts, pick = pts[order], pick[order]
     keep = _thin_out(pts, spacing[pick], seeds=seeds, seed_radius=float(spacing[faces].min()))
     return pts[keep], pick[keep]
 

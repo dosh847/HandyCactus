@@ -169,7 +169,7 @@ def test_timer_tick_rebuilds_on_parameter_change_and_stops_when_idle(scene):
     before = overlay.state.face_count
     scene.handycactus.overhang_angle = 80.0  # only near-horizontal faces still count
     assert overlay._tick() == overlay.TICK_SECONDS
-    assert overlay.state.signature[1] == pytest.approx(80.0)
+    assert overlay.state.signature[2] == pytest.approx(80.0)
     assert overlay.state.face_count == before  # the flat underside still needs support
     scene.handycactus.show_heatmap = False
     assert overlay._tick() is None  # idle: the timer stops itself without error

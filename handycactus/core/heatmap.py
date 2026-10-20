@@ -4,8 +4,12 @@
 Produces unrolled triangles (3 vertices per face) with one colour per face:
 - faces that need support, ramped from yellow (just past the overhang
   angle) to red (horizontal ceiling);
-- when contacts are known, faces farther than `tip_spacing` from every
-  contact are drawn in the gap colour instead.
+- when contacts (or the tips of a support set) are known, a face counts as
+  covered when a contact lies within COVERAGE_FACTOR × tip_spacing of it and
+  not above it (one layer of tolerance): a tip only holds up what is printed
+  after it, so it never covers faces below its own height. Covered faces are
+  drawn green, uncovered ones in the gap colour. The coverage check uses the
+  same rule.
 """
 
 from __future__ import annotations
@@ -21,6 +25,10 @@ from .params import Params
 LOW = np.array([1.0, 0.85, 0.1, 0.55])
 HIGH = np.array([0.9, 0.1, 0.05, 0.65])
 GAP = np.array([1.0, 0.0, 0.85, 0.8])
+COVERED = np.array([0.15, 0.85, 0.35, 0.35])
+# Contacts are at least tip_spacing apart, so a face can be up to ~that far from the
+# nearest one inside a well-sampled region.
+COVERAGE_FACTOR = 1.5
 
 
 @dataclass
@@ -37,8 +45,9 @@ def build(
     contacts: np.ndarray | None = None,
     support_faces: np.ndarray | None = None,
 ) -> Heatmap:
-    """`contacts` (K, 3) mm turns on coverage-gap colouring. `support_faces` (a detection
-    result's mask) replaces the angle-only estimate, e.g. leaving out buried faces."""
+    """`contacts` (K, 3) mm, surface points, turns on coverage colouring (see `covered`).
+    `support_faces` (a detection result's mask) replaces the angle-only estimate, e.g.
+    leaving out buried faces."""
     if support_faces is None:
         support_faces = estimate_support_faces(mesh, params)
     faces = np.flatnonzero(support_faces)
@@ -47,8 +56,9 @@ def build(
     colors = LOW + (HIGH - LOW) * t[:, None]
     gaps = 0
     if contacts is not None and len(faces):
-        gap = ~within(mesh.face_centroids[faces], np.asarray(contacts, dtype=np.float64), params.tip_spacing)
+        gap = ~covered(mesh.face_centroids[faces], np.asarray(contacts, dtype=np.float64), params)
         colors[gap] = GAP
+        colors[~gap] = COVERED
         gaps = int(gap.sum())
 
     # Drawn exactly on the surface; the overlay shader biases depth (no z-fighting).
@@ -69,8 +79,16 @@ def estimate_support_faces(mesh: MeshData, params: Params) -> np.ndarray:
     return (overhang | forced) & (mesh.face_min_z >= params.bed_ignore_height)
 
 
-def within(points: np.ndarray, targets: np.ndarray, radius: float) -> np.ndarray:
-    """(N,) bool: is any target within `radius` of each point. Spatial hash, radius-sized cells."""
+def covered(points: np.ndarray, contacts: np.ndarray, params: Params) -> np.ndarray:
+    """(N,) bool: a contact within COVERAGE_FACTOR × tip_spacing of each point and at most
+    one layer above it (a tip holds up what is printed after it: its own layer and up)."""
+    return within(points, contacts, COVERAGE_FACTOR * params.tip_spacing, below=params.layer_height)
+
+
+def within(points: np.ndarray, targets: np.ndarray, radius: float, below: float | None = None) -> np.ndarray:
+    """(N,) bool: is any target within `radius` of each point. Spatial hash, radius-sized cells.
+
+    With `below`, a target only counts when it is at most that far above the point."""
     out = np.zeros(len(points), dtype=bool)
     if len(points) == 0 or len(targets) == 0 or radius <= 0:
         return out
@@ -104,5 +122,8 @@ def within(points: np.ndarray, targets: np.ndarray, radius: float) -> np.ndarray
         cand = np.concatenate([targets_sorted[a:b] for a, b in zip(first[k], last[k], strict=True) if b > a])
         idx = order[starts[k] : starts[k + 1]]
         d2 = ((points[idx, None, :] - cand[None, :, :]) ** 2).sum(axis=2)
-        out[idx] = (d2 <= r2).any(axis=1)
+        ok = d2 <= r2
+        if below is not None:
+            ok &= cand[None, :, 2] <= points[idx, None, 2] + below
+        out[idx] = ok.any(axis=1)
     return out

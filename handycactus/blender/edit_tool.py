@@ -51,7 +51,7 @@ class _EditOperator:
         if not result.ok:
             self.report({"WARNING"}, result.message)
             return {"CANCELLED"}
-        overlay.set_findings(support.handycactus_set.findings)
+        overlay.refresh()
         self.report({"INFO"}, result.message)
         return {"FINISHED"}
 
@@ -201,7 +201,8 @@ class HANDYCACTUS_OT_rebuild_tip(_EditOperator, Operator):
 PICKABLE = (CONTACT, KNUCKLE, BRANCH, JUNCTION)
 HELP = (
     "Click model: add tip  |  Drag tip: move  |  Drag branch node: move  |  "
-    "Ctrl+click tip: delete  |  L: lock/unlock tree  |  T: tip settings  |  Esc/Right-click: done"
+    "Ctrl+click tip: delete  |  L: lock/unlock tree  |  T: tip settings  |  "
+    "Ctrl+Z / Ctrl+Shift+Z: undo / redo  |  Esc/Right-click: done"
 )
 
 
@@ -271,6 +272,19 @@ class HANDYCACTUS_OT_edit_supports(Operator):
         hover = self.graph.pos[self.hover] if self.hover >= 0 else None
         overlay.set_edit_feedback(hover, self.graph.pos[self.drag[1]] if self.drag else None)
 
+    def _undo(self, context, redo: bool):
+        """Step Blender's undo stack from inside the tool. Every edit pushed one step, so
+        this undoes one edit at a time; undoing past the tool's start is allowed (undoing
+        Generate removes the supports and ends the tool)."""
+        op = bpy.ops.ed.redo if redo else bpy.ops.ed.undo
+        if op.poll():
+            op()
+        self.drag = None
+        if self._support() is not None:
+            self._reload(context)
+        self.hover = -1
+        self._feedback()
+
     def _edit(self, context, op, message, **kwargs):
         result = op(**kwargs)
         if "FINISHED" in result:
@@ -287,6 +301,15 @@ class HANDYCACTUS_OT_edit_supports(Operator):
             return {"PASS_THROUGH"}
         if event.type in {"ESC", "RIGHTMOUSE"} and event.value == "PRESS":
             return self._finish(context)
+
+        if event.type == "Z" and event.value == "PRESS" and (event.ctrl or event.oskey):
+            self._undo(context, redo=event.shift)
+            if self._support() is None:
+                return self._finish(context)
+            return {"RUNNING_MODAL"}
+        if event.type == "Y" and event.value == "PRESS" and event.ctrl:
+            self._undo(context, redo=True)
+            return {"RUNNING_MODAL"}
 
         if event.type == "MOUSEMOVE":
             if self.drag is None:

@@ -94,9 +94,16 @@ def _build_settings_class():
             default="MM",
             update=_on_units_changed,
         ),
+        "show_markers": BoolProperty(
+            name="Show Contacts and Markers",
+            description="Show previewed contacts and check markers of the selected support sets",
+            default=True,
+            update=_on_heatmap_toggled,
+        ),
         "show_heatmap": BoolProperty(
             name="Overhang Heatmap",
-            description="Colour the faces of the selected meshes that need support",
+            description="Colour the faces of the selected meshes that need support; the tips of a "
+            "selected support set turn the faces they hold up (near and above them) green",
             default=False,
             update=_on_heatmap_toggled,
         ),
