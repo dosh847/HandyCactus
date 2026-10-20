@@ -15,7 +15,7 @@ from __future__ import annotations
 import bpy
 
 GROUP_NAME = "HC_SupportGeometry"
-VERSION = 2  # bump when the node layout changes; stale groups are rebuilt
+VERSION = 3  # bump when the node layout changes; stale groups are rebuilt
 VERSION_KEY = "hc_gn_version"
 
 
@@ -156,9 +156,27 @@ def _build(ng) -> None:
     join = n.new("GeometryNodeJoinGeometry")
     link(realize.outputs["Geometry"], join.inputs["Geometry"])
     link(tubes.outputs["Mesh"], join.inputs["Geometry"])
+    # Nothing below the bed: a thick foot's ring, tilted a few degrees by the branch above,
+    # can reach under z = 0. Flatten it onto the bed (supports objects sit at the origin).
+    position = n.new("GeometryNodeInputPosition")
+    xyz = n.new("ShaderNodeSeparateXYZ")
+    link(position.outputs["Position"], xyz.inputs["Vector"])
+    floor = n.new("ShaderNodeMath")
+    floor.operation = "MAXIMUM"
+    link(xyz.outputs["Z"], floor.inputs[0])
+    floor.inputs[1].default_value = 0.0
+    clamped = n.new("ShaderNodeCombineXYZ")
+    link(xyz.outputs["X"], clamped.inputs["X"])
+    link(xyz.outputs["Y"], clamped.inputs["Y"])
+    link(floor.outputs["Value"], clamped.inputs["Z"])
+    on_bed = n.new("GeometryNodeSetPosition")
+    link(join.outputs["Geometry"], on_bed.inputs["Geometry"])
+    link(clamped.outputs["Vector"], on_bed.inputs["Position"])
     smooth = n.new("GeometryNodeSetShadeSmooth")
-    link(join.outputs["Geometry"], smooth.inputs["Mesh"])
+    link(on_bed.outputs["Geometry"], smooth.inputs["Mesh"])
     link(smooth.outputs["Mesh"], gout.inputs["Geometry"])
+    for i, node in enumerate((position, xyz, floor, clamped, on_bed)):
+        node.location = (1100 + i * 180, -700)
 
     for i, node in enumerate((gin, branch_curve, spline_type, resolution, curves, tubes, join, smooth, gout)):
         node.location = (i * 220, 0)

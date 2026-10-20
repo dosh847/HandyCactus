@@ -809,6 +809,17 @@ dependencies.
   off the corner (min x, min y) of the footprint of model plus supports,
   so they touch nothing.
 
+**Nothing below the bed (v0.7).** On the lich, three things reached up to
+1.5 mm under z = 0:
+- **Merges right above a foot.** A junction at 0.5 mm had a 2 mm ball. There
+  is now no merging inside the vertical trunk base, so every trunk stands
+  straight on its own foot.
+- **Balls in general.** They are clamped to their node's height.
+- **Thick feet.** A few degrees of tilt in the tube above a 1–2 mm foot
+  swings its ring up to 0.6 mm under. The node group now flattens anything
+  below z = 0 onto the bed (Set Position, z = max(z, 0)). This is exact, and
+  gives the feet flat bottoms.
+
 **Bambu Studio "The 3mf file has invalid config, load geometry data only".**
 - **Cause:** a dialog bug in Bambu Studio v02.08.02.60/.61.
   `check_project_config` returns false for the empty project config of any

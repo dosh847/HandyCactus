@@ -158,6 +158,8 @@ def route(
     graph.renumber_trees()
     junction = graph.kind == JUNCTION
     graph.sphere[junction] = graph.radius[junction]
+    # A ball never reaches below the bed.
+    graph.sphere = np.minimum(graph.sphere, np.maximum(graph.pos[:, 2], 0.0))
 
     supported = np.unique(graph.tip[graph.kind == CONTACT])
     all_tips = np.arange(len(tips))
@@ -435,6 +437,10 @@ def _merge_and_extend(b: GraphBuilder, awake, heads, params, obstacles) -> None:
         return float(obstacles.nearest_distance(p[None])[0]) >= merged_radius(idx) + HARD_CLEARANCE
 
     blocked = np.array([h.blocked for h in awake])
+    # No merging inside the vertical trunk base: every trunk stands straight on its own
+    # foot (a junction there would put its ball, and a leaning branch, into the bed).
+    in_base = pos[:, 2] < _base_height(params) - 1e-9
+    blocked = blocked | in_base
     pairs = np.argwhere(np.triu((d <= limit) & ~blocked[:, None] & ~blocked[None, :], k=1))
     for i, j in sorted(pairs.tolist(), key=lambda ij: d[ij[0], ij[1]]):
         gi, gj = find(i), find(j)

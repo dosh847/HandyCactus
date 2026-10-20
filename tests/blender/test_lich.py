@@ -33,3 +33,17 @@ def test_lich_contacts_reach(lich):
     result = pipeline.generate(bpy.context, [lich])
     total = result.tips + result.unreachable
     assert result.unreachable <= 0.04 * total, (result.unreachable, total)
+
+
+def test_lich_supports_stay_above_the_bed(lich):
+    from handycactus.blender import export_ops
+
+    pipeline.generate(bpy.context, [lich])
+    support = next(ob for ob in bpy.context.scene.objects if ob.handycactus_set.is_support)
+    graph = pipeline.read_support_graph(bpy.context, support)
+    # No junction ball below the bed (a merge right above a foot had a 2 mm ball at 0.5 mm).
+    assert (graph.pos[:, 2] - graph.sphere).min() >= -1e-6
+    parts = export_ops.collect_parts(bpy.context, support, riser=True)
+    sup = parts[-1]
+    assert sup.verts[:, 2].min() == pytest.approx(0.0, abs=1e-4)  # flat on the bed, never under it
+    assert parts[0].verts[:, 2].min() == pytest.approx(0.0, abs=1e-4)  # the riser reaches the bed
