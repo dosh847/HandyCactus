@@ -13,7 +13,7 @@ import numpy as np
 
 from .detection import SAMPLE, Contacts
 from .graph import BRANCH, CONTACT, FLAG_MANUAL, FLAG_OVERRIDE, JUNCTION, KNUCKLE, ROOT_KINDS, SupportGraph
-from .params import Params
+from .params import Params, radius_at
 from .routing import RoutingResult, route
 from .spatial import Obstacles
 from .tips import build_tips
@@ -62,20 +62,25 @@ def merge_routed(
     new.tip = np.where(new.tip >= 0, new.tip + offset, -1)
     merged = concat(existing, new)
     n0 = len(existing)
+    roots = new.roots() if len(new) else np.zeros(0, np.int64)
     for local, target in routed.attachments:
         merged.parent[n0 + local] = target
-        _thicken_below(merged, target, float(new.radius[local]), params)
+        knuckles = (roots == roots[local]) & (new.kind == KNUCKLE)
+        top = float(new.pos[knuckles, 2].max()) if knuckles.any() else float(new.pos[local, 2])
+        _thicken_below(merged, target, top, params)
     merged.renumber_trees()
     is_new = np.zeros(len(merged), bool)
     is_new[n0:] = True
     return merged, is_new
 
 
-def _thicken_below(graph: SupportGraph, node: int, r_add: float, params: Params) -> None:
-    """Area-conserving radius growth from `node` down to its root (feet keep their flare)."""
+def _thicken_below(graph: SupportGraph, node: int, top: float, params: Params) -> None:
+    """From `node` down to its root, make each branch at least as thick as a branch
+    carrying a tip at height `top` (radius by height below the highest tip, as routing
+    does). Feet keep their flare."""
     while node >= 0 and graph.kind[node] not in ROOT_KINDS:
-        r = graph.radius[node]
-        graph.radius[node] = min(params.max_radius, max(r, float(np.sqrt(r * r + r_add * r_add))))
+        want = radius_at(params, top - graph.pos[node, 2])
+        graph.radius[node] = max(graph.radius[node], want)
         if graph.kind[node] == JUNCTION:
             graph.sphere[node] = graph.radius[node]
         node = int(graph.parent[node])

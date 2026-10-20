@@ -20,7 +20,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .graph import BRANCH, CONTACT, FOOT, JUNCTION, KNUCKLE, LANDING, ROOT_KINDS, GraphBuilder, SupportGraph
-from .params import Params
+from .params import Params, radius_at
+from .smoothing import smooth
 from .spatial import Obstacles
 from .tips import BRANCH_HARD_CLEARANCE, Tips
 
@@ -33,7 +34,10 @@ MERGE_SLACK = 0.3  # mm beyond the larger radius at which two heads merge
 # radius + HARD_CLEARANCE when that is the only way down.
 HARD_CLEARANCE = BRANCH_HARD_CLEARANCE
 AVOID_AZIMUTHS = 16
-DECIMATE_DEGREES = 3.0  # straight-enough runs of branch nodes collapse to one segment
+# Trunks run straight up from the foot for this long (Orca keeps trunks vertical near
+# the bed): no leaning toward merge partners below it, and smoothing leaves it alone.
+TRUNK_BASE_MM = 0.4
+DECIMATE_TOLERANCE = 0.03  # mm a collapsed segment may stray (or fatten) past a skipped node
 
 
 @dataclass
@@ -50,6 +54,7 @@ class _Head:
     node: int  # graph node at the head's current position
     pos: np.ndarray
     radius: float
+    top: float = 0.0  # height of the highest knuckle this head carries (sets its radius)
     awake: bool = False
     prev: np.ndarray | None = None  # position before this level's move
     reach: float = 0.0  # horizontal reach of this level's move (cone limit)
@@ -77,10 +82,11 @@ def route(
             tips.contact[i], CONTACT, r_contact, parent=k, tip=int(i), target=int(tips.target[i]),
             direction=tips.axis[i],
         )  # fmt: skip
-        heads.append(_Head(k, tips.knuckle[i].copy(), params.min_radius))
+        heads.append(_Head(k, tips.knuckle[i].copy(), params.min_radius, top=float(tips.knuckle[i][2])))
 
     stuck_nodes: list[int] = []
     tan = np.tan(np.radians(params.max_branch_angle))
+    tan_pref = np.tan(np.radians(min(params.preferred_branch_angle, params.max_branch_angle)))
     floor = max(params.foot_height, 0.0)
     level = max((h.pos[2] for h in heads), default=floor)
 
@@ -104,7 +110,7 @@ def route(
         for h, target_xy in zip(awake, targets, strict=True):
             if landing and h.landing is not None and _land(b, h, h.landing, params, obstacles, tan):
                 continue  # done: this head ends on the model
-            new_pos = _move(h, target_xy, new_level, params, obstacles, tan)
+            new_pos = _move(h, target_xy, new_level, params, obstacles, tan, tan_pref)
             if new_pos is None:
                 spot = (
                     _find_landing(h.pos, obstacles, tan, LANDING_REACH * params.tip_length)
@@ -115,9 +121,11 @@ def route(
                     stuck_nodes.append(h.node)
                 continue
             dz = h.pos[2] - new_level
-            # Grow with the taper, but never into the hard clearance next to the model.
+            # The radius follows the height below the highest tip carried (as in Cura and
+            # Orca: no jump at merges), but never grows into the hard clearance next to the
+            # model, and never shrinks going down.
             room = float(obstacles.nearest_distance(new_pos[None])[0]) - HARD_CLEARANCE
-            grown = min(params.max_radius, h.radius + params.taper_rate * dz)
+            grown = _radius_at(params, h.top - new_level)
             h.radius = max(min(grown, room), min(h.radius, grown), params.min_radius)
             h.prev, h.reach = h.pos, dz * tan
             h.pos = new_pos
@@ -143,6 +151,8 @@ def route(
     remap = np.cumsum(keep) - 1
     attachments = [(int(remap[n]), t) for n, t in attachments if keep[n]]
     graph = graph.subset(keep)
+    fixed = attached[keep] | (graph.pos[:, 2] < _base_height(params) - 1e-9)
+    smooth(graph, params, obstacles, fixed, HARD_CLEARANCE)
     graph = _decimate(graph)  # attached roots have no parent, so they are never removed
     attachments = _remap_after_decimate(graph, attachments)
     graph.renumber_trees()
@@ -225,6 +235,7 @@ def _desired_xy(awake, heads, params, obstacles, tan, new_level) -> list[np.ndar
     partner = np.argmin(d_xy, axis=1)
     has_partner = np.isfinite(d_xy[np.arange(len(awake)), partner])
 
+    base = _base_height(params)
     out = []
     for i, h in enumerate(awake):
         if h.blocked:
@@ -240,6 +251,9 @@ def _desired_xy(awake, heads, params, obstacles, tan, new_level) -> list[np.ndar
                     continue
             dz = h.pos[2] - new_level
             out.append(h.pos[:2] + direction[:2] / max(-direction[2], 1e-6) * dz)
+        elif new_level < base:
+            h.escape = None  # the vertical trunk base: straight down
+            out.append(h.pos[:2].copy())
         elif has_partner[i]:
             h.escape = None
             other = heads[partner[i]]
@@ -251,6 +265,10 @@ def _desired_xy(awake, heads, params, obstacles, tan, new_level) -> list[np.ndar
             h.escape = None
             out.append(h.pos[:2].copy())
     return out
+
+
+def _base_height(params: Params) -> float:
+    return max(params.foot_height, 0.0) + TRUNK_BASE_MM
 
 
 def _escape(h, obstacles, tan) -> np.ndarray:
@@ -334,12 +352,22 @@ def _cone_directions(max_angle_deg: float) -> np.ndarray:
 _ESCAPE_DIRS_CACHE: dict[float, np.ndarray] = {}
 
 
-def _move(h, target_xy, new_level, params, obstacles, tan) -> np.ndarray | None:
+def _radius_at(params: Params, below_top: float) -> float:
+    """Branch radius at `below_top` mm under the highest tip it carries."""
+    return radius_at(params, below_top)
+
+
+def _move(h, target_xy, new_level, params, obstacles, tan, tan_pref) -> np.ndarray | None:
+    """This level's position for a head. Ordinary moves (straight down, toward a merge
+    partner) lean at most the preferred angle; escaping, landing and dodging the model
+    may use the full branch angle (PrusaSlicer/Orca's slow and fast moves)."""
     dz = h.pos[2] - new_level
     reach = dz * tan
+    steering = h.blocked or h.landing is not None
     want = target_xy - h.pos[:2]
     dist = np.linalg.norm(want)
-    step_xy = want if dist <= reach else want / dist * reach
+    wish = reach if steering else dz * tan_pref
+    step_xy = want if dist <= wish else want / dist * wish
     desired = np.array([h.pos[0] + step_xy[0], h.pos[1] + step_xy[1], new_level])
 
     need = h.radius + params.model_clearance
@@ -398,10 +426,13 @@ def _merge_and_extend(b: GraphBuilder, awake, heads, params, obstacles) -> None:
         # Every member must reach the junction from its previous node inside its cone.
         return bool(np.all(np.linalg.norm(prev[idx] - p[:2], axis=1) <= reach[idx]))
 
+    def merged_radius(idx):
+        # The thicker branch's radius: the radius already follows the tallest tip carried.
+        return min(params.max_radius, float(rad[idx].max()) * params.merge_growth)
+
     def has_room(idx, p):
-        # The merged (thicker) branch must keep the hard clearance at the junction.
-        r = min(params.max_radius, float(np.sqrt((rad[idx] ** 2).sum())) * params.merge_growth)
-        return float(obstacles.nearest_distance(p[None])[0]) >= r + HARD_CLEARANCE
+        # The merged branch must keep the hard clearance at the junction.
+        return float(obstacles.nearest_distance(p[None])[0]) >= merged_radius(idx) + HARD_CLEARANCE
 
     blocked = np.array([h.blocked for h in awake])
     pairs = np.argwhere(np.triu((d <= limit) & ~blocked[:, None] & ~blocked[None, :], k=1))
@@ -426,18 +457,25 @@ def _merge_and_extend(b: GraphBuilder, awake, heads, params, obstacles) -> None:
             h.node = node
             continue
         p = junction(np.array(idx))
-        r = min(params.max_radius, float(np.sqrt((rad[idx] ** 2).sum())) * params.merge_growth)
+        r = merged_radius(np.array(idx))
         node = b.add(p, JUNCTION, r)
         for i in idx:
             b.set_parent(awake[i].node, node)
         keep = awake[idx[0]]
         keep.node, keep.pos, keep.radius = node, p, r
+        keep.top = max(awake[i].top for i in idx)
         dead.update(id(awake[i]) for i in idx[1:])
     heads[:] = [h for h in heads if id(h) not in dead]
 
 
 def _decimate(graph: SupportGraph) -> SupportGraph:
-    """Collapse straight runs of single-child branch nodes into one segment."""
+    """Collapse runs of single-child branch nodes into fewer, longer segments.
+
+    A run is walked top-down; a segment is extended over the next node while every node
+    it skips stays within DECIMATE_TOLERANCE of it, counting both the position and how
+    much fatter the segment's (linearly interpolated) radius is than the node's own. So
+    the tubes never get closer to the model than the nodes routing checked.
+    """
     n = len(graph)
     if n == 0:
         return graph
@@ -446,18 +484,42 @@ def _decimate(graph: SupportGraph) -> SupportGraph:
     has_parent = graph.parent >= 0
     child_of[graph.parent[has_parent]] = np.flatnonzero(has_parent)  # valid where children == 1
     parent = graph.parent.copy()
+    p_kind = graph.kind[np.maximum(parent, 0)]
+    # The node above a foot or landing sets where the flare / tip starts: never removed.
+    removable = (graph.kind == BRANCH) & (children == 1) & has_parent & ~np.isin(p_kind, ROOT_KINDS)
     removed = np.zeros(n, bool)
-    cos_limit = np.cos(np.radians(DECIMATE_DEGREES))
-    for node in np.flatnonzero((graph.kind == BRANCH) & (children == 1)):
-        c, p = child_of[node], parent[node]
-        if p < 0 or c < 0 or graph.kind[p] in ROOT_KINDS:
-            continue  # the node above a foot or landing sets where the flare / tip starts
-        a = graph.pos[node] - graph.pos[c]
-        bvec = graph.pos[p] - graph.pos[node]
-        la, lb = np.linalg.norm(a), np.linalg.norm(bvec)
-        if la < 1e-9 or lb < 1e-9 or (a @ bvec) / (la * lb) >= cos_limit:
-            parent[c] = p
-            child_of[p] = c if children[p] == 1 else child_of[p]
-            removed[node] = True
+    starts = np.flatnonzero(removable & ~removable[np.maximum(child_of, 0)])
+    for s in starts:
+        run = [int(s)]
+        while removable[parent[run[-1]]]:
+            run.append(int(parent[run[-1]]))
+        chain = [int(child_of[s]), *run, int(parent[run[-1]])]
+        kept = [chain[0]]
+        anchor = 0
+        for j in range(2, len(chain)):
+            if not _straight_enough(graph, chain, anchor, j):
+                anchor = j - 1
+                kept.append(chain[anchor])
+        kept.append(chain[-1])
+        keep_set = set(kept)
+        for node in run:
+            removed[node] = node not in keep_set
+        for upper, lower in zip(kept[:-1], kept[1:], strict=True):
+            parent[upper] = lower
     graph.parent = parent
     return graph.subset(~removed)
+
+
+def _straight_enough(graph: SupportGraph, chain: list[int], i: int, j: int) -> bool:
+    """Can chain[i] -> chain[j] replace the nodes between them (see _decimate)."""
+    a, b = graph.pos[chain[i]], graph.pos[chain[j]]
+    ra, rb = graph.radius[chain[i]], graph.radius[chain[j]]
+    ab = b - a
+    length2 = float(ab @ ab)
+    if length2 < 1e-18:
+        return True
+    mid = np.array(chain[i + 1 : j])
+    t = np.clip((graph.pos[mid] - a) @ ab / length2, 0.0, 1.0)
+    off = np.linalg.norm(a + t[:, None] * ab - graph.pos[mid], axis=1)
+    fatter = np.maximum(ra + (rb - ra) * t - graph.radius[mid], 0.0)
+    return bool(np.all(off + fatter <= DECIMATE_TOLERANCE))

@@ -122,8 +122,9 @@ def test_bed_is_preferred_over_landing():
 
 
 def test_multi_target_trees_may_merge():
-    a = voxels([((0, 0, 4), (4, 4, 8))], name="a")
-    b = voxels([((4.5, 0, 4), (8.5, 4, 8))], name="b")
+    # High enough to merge above the vertical trunk base at the preferred branch angle.
+    a = voxels([((0, 0, 8), (4, 4, 12))], name="a")
+    b = voxels([((4.5, 0, 8), (8.5, 4, 12))], name="b")
     _, _, r, _ = generate(a, b)
     g = r.graph
     targets_per_tree = {}

@@ -184,16 +184,27 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         "mm",
         "Smallest branch radius; keep at least half the nozzle diameter",
     ),
+    ParamSpec(
+        "branch_radius",
+        "branches",
+        "Branch Radius",
+        0.6,
+        0.1,
+        4.0,
+        "mm",
+        "Radius a branch widens to just below its tips (a short cone from Min Radius), "
+        "before the taper adds to it",
+    ),
     ParamSpec("max_radius", "branches", "Max Radius", 2.0, 0.4, 8.0, "mm", "Largest trunk radius"),
     ParamSpec(
         "taper_rate",
         "branches",
         "Taper Rate",
-        0.03,
+        0.07,
         0.0,
         0.2,
         "mm/mm",
-        "Radius growth per millimetre of descent",
+        "Radius growth per millimetre below the highest tip a branch carries (0.07 is about 4°)",
     ),
     ParamSpec(
         "max_branch_angle",
@@ -203,7 +214,17 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         0.0,
         60.0,
         "deg",
-        "Largest angle of a branch from vertical",
+        "Largest angle of a branch from vertical (used to steer around the model)",
+    ),
+    ParamSpec(
+        "preferred_branch_angle",
+        "branches",
+        "Preferred Branch Angle",
+        35.0,
+        0.0,
+        60.0,
+        "deg",
+        "Largest angle for ordinary moves, such as leaning toward a branch to merge with",
     ),
     ParamSpec(
         "merge_distance",
@@ -223,7 +244,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         0.8,
         1.3,
         "x",
-        "Radius multiplier applied when two branches merge",
+        "Radius multiplier at a merge (the merged branch takes the thicker one's radius)",
     ),
     ParamSpec(
         "model_clearance",
@@ -300,9 +321,11 @@ class Params:
     max_tip_angle: float = _default("max_tip_angle")
     knuckle_diameter: float = _default("knuckle_diameter")
     min_radius: float = _default("min_radius")
+    branch_radius: float = _default("branch_radius")
     max_radius: float = _default("max_radius")
     taper_rate: float = _default("taper_rate")
     max_branch_angle: float = _default("max_branch_angle")
+    preferred_branch_angle: float = _default("preferred_branch_angle")
     merge_distance: float = _default("merge_distance")
     merge_growth: float = _default("merge_growth")
     model_clearance: float = _default("model_clearance")
@@ -328,6 +351,10 @@ class Params:
             value = getattr(self, spec.name)
             if not spec.min <= value <= spec.max:
                 out.append(f"{spec.label} {value} is outside {spec.min}–{spec.max}")
+        if self.preferred_branch_angle > self.max_branch_angle:
+            out.append("Preferred Branch Angle is larger than Max Branch Angle")
+        if not self.min_radius <= self.branch_radius <= self.max_radius:
+            out.append("Branch Radius must be between Min Radius and Max Radius")
         if self.min_radius > self.max_radius:
             out.append("Min Radius is larger than Max Radius")
         if self.min_tip_length > self.tip_length:
@@ -359,6 +386,7 @@ PRESETS: tuple[Preset, ...] = (
             "contact_diameter": 0.25,
             "tip_length": 1.3,
             "knuckle_diameter": 0.5,
+            "branch_radius": 0.5,
             "max_radius": 1.6,
             "foot_radius": 1.2,
         },
@@ -373,6 +401,7 @@ PRESETS: tuple[Preset, ...] = (
             "contact_diameter": 0.35,
             "tip_length": 1.8,
             "knuckle_diameter": 0.7,
+            "branch_radius": 0.7,
             "max_radius": 2.4,
             "foot_radius": 1.8,
         },
@@ -384,6 +413,7 @@ PRESETS: tuple[Preset, ...] = (
         {
             "nozzle_diameter": 0.4,
             "min_radius": 0.4,
+            "branch_radius": 0.8,
             "contact_diameter": 0.4,
         },
     ),
@@ -391,3 +421,16 @@ PRESETS: tuple[Preset, ...] = (
 
 PRESETS_BY_ID: Mapping[str, Preset] = {p.id: p for p in PRESETS}
 DEFAULT_PRESET_ID = "MINI_42"
+
+
+# Below a tip, a branch widens from min_radius to branch_radius at this rate (mm per mm,
+# about 4.6°; added to taper_rate), like Orca/PrusaSlicer's tip cone before the branch
+# angle takes over. Faster looks like a carrot under every tip.
+BRANCH_CONE_RATE = 0.08
+
+
+def radius_at(params: Params, below_top: float) -> float:
+    """Branch radius `below_top` mm under the highest tip it carries."""
+    h = max(below_top, 0.0)
+    cone = min(params.branch_radius, params.min_radius + BRANCH_CONE_RATE * h)
+    return min(params.max_radius, max(cone, params.min_radius) + params.taper_rate * h)
