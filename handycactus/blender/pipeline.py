@@ -46,7 +46,7 @@ def inside_testers(context, objects, mesh: MeshData) -> list:
     scale = scene_mm_per_bu(context.scene)
     testers = []
     for i, ob in enumerate(objects):
-        if mesh.non_manifold_edge_count(i):
+        if not mesh.is_nearly_closed(i):
             testers.append(None)
             continue
         lo, hi = _bounds(mesh, i)
@@ -263,7 +263,7 @@ def _testers_from(trees, mesh: MeshData) -> list:
     """Inside testers on world-space BVHs; None for open targets."""
     testers = []
     for i, tree in enumerate(trees):
-        if mesh.non_manifold_edge_count(i):
+        if not mesh.is_nearly_closed(i):
             testers.append(None)
         else:
             lo, hi = _bounds(mesh, i)

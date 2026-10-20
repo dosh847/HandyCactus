@@ -150,3 +150,43 @@ def test_merge_and_drop_degenerate():
     )
     clean = drop_degenerate(bad)
     assert len(clean.tris) == 1 and len(clean.verts) == 3  # collinear and repeated-index ones go
+
+
+def test_riser_pads_hold_each_model_part_on_the_supports_floor():
+    from handycactus.export.parts import RISER_HEIGHT, add_risers, riser_pad
+
+    ps = parts()  # body floats at z 3, arm higher; supports stand on z 0
+    lifted = add_risers(ps)
+    assert [p.name for p in lifted] == [p.name for p in ps]
+    sup = lifted[2]
+    assert sup.verts.shape == ps[2].verts.shape  # the supports are untouched
+    footprint_lo = np.concatenate([p.verts for p in ps])[:, :2].min(axis=0)
+    for before, after in zip(ps[:2], lifted[:2], strict=True):
+        pad = after.verts[len(before.verts) :]
+        assert len(after.tris) == len(before.tris) + 44  # 12-sided prism
+        assert pad[:, 2].min() == 0.0 and pad[:, 2].max() == RISER_HEIGHT  # on the supports' floor
+        assert np.all(pad[:, :2].max(axis=0) < footprint_lo)  # off the footprint: touches nothing
+    # The two pads do not overlap each other.
+    a = lifted[0].verts[len(ps[0].verts) :, :2]
+    b = lifted[1].verts[len(ps[1].verts) :, :2]
+    assert a[:, 0].min() > b[:, 0].max() or b[:, 0].min() > a[:, 0].max()
+    # A closed, outward-facing pad: positive volume by the divergence theorem.
+    v, t = riser_pad((0, 0), 0.0)
+    tri = v[t]
+    volume = np.einsum("ij,ij->i", tri[:, 0], np.cross(tri[:, 1], tri[:, 2])).sum() / 6
+    assert volume == pytest.approx(7.295, abs=0.01)  # the user's Riser.stl pad
+
+
+def test_riser_3mf_is_valid(tmp_path):
+    lib3mf = pytest.importorskip("lib3mf")
+    from handycactus.export.parts import add_risers
+
+    path = tmp_path / "riser.3mf"
+    write_3mf(str(path), "mini", add_risers(parts()))
+    model = lib3mf.get_wrapper().CreateModel()
+    reader = model.QueryReader("3mf")
+    reader.SetStrictModeActive(True)
+    reader.ReadFromFile(str(path))
+    meshes = model.GetMeshObjects()
+    while meshes.MoveNext():
+        assert meshes.GetCurrentMeshObject().IsManifoldAndOriented()

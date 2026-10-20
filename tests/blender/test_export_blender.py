@@ -65,22 +65,29 @@ def test_export_3mf_operator(support, tmp_path):
     meshes = load_3mf(path)
     assert list(meshes) == ["box", support.name]
     box_verts, box_tris, box_ok = meshes["box"]
-    assert box_ok and box_tris == 6 * 16 * 2
+    assert box_ok and box_tris == 6 * 16 * 2 + 44  # with its riser pad (on by default)
     sup_verts, _, _ = meshes[support.name]
     assert sup_verts[:, 2].min() == pytest.approx(0.0, abs=1e-3)
+    # The model part reaches the bed through its riser, so a slicer will not drop it.
+    assert box_verts[:, 2].min() == pytest.approx(0.0, abs=1e-3)
+    assert np.sort(np.unique(box_verts[:, 2].round(3)))[:2].tolist() == [0.0, 0.5]
+
+    plain = tmp_path / "no_riser.3mf"
+    assert bpy.ops.handycactus.export_3mf(filepath=str(plain), riser=False) == {"FINISHED"}
+    assert load_3mf(plain)["box"][0][:, 2].min() == pytest.approx(10.0)
 
 
 def test_export_stl_merged_and_separate(support, tmp_path):
     parts = export_ops.collect_parts(bpy.context, support)
     merged = tmp_path / "box.stl"
     assert bpy.ops.handycactus.export_stl(filepath=str(merged), mode="MERGED") == {"FINISHED"}
-    assert len(read_stl(str(merged))) == sum(len(p.tris) for p in parts)
+    assert len(read_stl(str(merged))) == sum(len(p.tris) for p in parts) + 44  # riser pad
 
     separate = tmp_path / "sep.stl"
     assert bpy.ops.handycactus.export_stl(filepath=str(separate), mode="SEPARATE") == {"FINISHED"}
     files = sorted(os.listdir(tmp_path))
     assert "sep_box.stl" in files and f"sep_{support.name}.stl" in files
-    assert len(read_stl(str(tmp_path / "sep_box.stl"))) == len(parts[0].tris)
+    assert len(read_stl(str(tmp_path / "sep_box.stl"))) == len(parts[0].tris) + 44
 
 
 def test_scene_units_export_in_mm(support):
@@ -114,4 +121,4 @@ def test_export_3mf_for_prusaslicer(support, tmp_path):
     parts = export_ops.collect_parts(bpy.context, support)
     meshes = load_3mf(path)
     (name,) = meshes
-    assert name == "box" and meshes[name][1] == sum(len(p.tris) for p in parts)
+    assert name == "box" and meshes[name][1] == sum(len(p.tris) for p in parts) + 44

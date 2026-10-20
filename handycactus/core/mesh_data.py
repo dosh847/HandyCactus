@@ -12,6 +12,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+# Fraction of a target's edges that may be open or shared by more than two faces
+# while it still counts as closed for the inside test (138 of 149k on a decimated sculpt).
+NEARLY_CLOSED = 0.005
+
 
 @dataclass
 class TargetMesh:
@@ -102,6 +106,13 @@ class MeshData:
         first = run_start[run_id]
         is_follower = np.arange(len(e)) != first
         return faces[first[is_follower]], faces[is_follower], e[is_follower]
+
+    def is_nearly_closed(self, target: int) -> bool:
+        """Closed but for pinholes: at most NEARLY_CLOSED of its edges are used by other
+        than two faces. Decimated sculpts often have a few; the ray winding-number inside
+        test (majority of 3 rays) is not thrown off by them."""
+        n_edges = 1.5 * np.count_nonzero(self.face_target == target)
+        return self.non_manifold_edge_count(target) <= NEARLY_CLOSED * n_edges
 
     def non_manifold_edge_count(self, target: int) -> int:
         """Edges of a target used by other than exactly two faces (0 = closed)."""

@@ -1,6 +1,7 @@
-# HandyCactus — Tree Supports for FDM in Blender (Spec v0.6)
+# HandyCactus — Tree Supports for FDM in Blender (Spec v0.7)
 
-> Status: v0.6. M5: 3MF and STL export (2026-10-20). v0.5: fewer unreachable contacts
+> Status: v0.7. Riser pads, nearly closed meshes, first real test sculpt (2026-10-20).
+> v0.6: M5, 3MF and STL export. v0.5: fewer unreachable contacts
 > (self-supporting patches, gap fill, tip relocation, routing retry). v0.4 added the tree shape rules from slicer
 > research; v0.3 landing and manual editing (M4).
 
@@ -797,6 +798,30 @@ dependencies.
 - **Still to do (§13):** open the exports in Bambu Studio, OrcaSlicer,
   PrusaSlicer and Cura, and slice them.
 
+**Riser (v0.7, on by default for 3MF and STL).**
+- **Why:** a slicer drops a floating object onto the bed, which pulls the
+  model away from its supports. The whole 3MF object is safe, because its
+  supports reach z = 0. But once it is split into parts ("Break objects"),
+  each model part would drop on its own.
+- **What:** each model part gets a riser pad merged into its mesh, with its
+  bottom on the supports' floor. The pad is the owner's Riser.stl shape: a
+  4 mm rounded square, 0.5 mm tall, 12 sides. The pads sit in a row 1 mm
+  off the corner (min x, min y) of the footprint of model plus supports,
+  so they touch nothing.
+
+**Bambu Studio "The 3mf file has invalid config, load geometry data only".**
+- **Cause:** a dialog bug in Bambu Studio v02.08.02.60/.61.
+  `check_project_config` returns false for the empty project config of any
+  3MF not written by Bambu Studio (Plater.cpp at v02.08.02.61).
+- **Fixed upstream:** v02.08.03.65 turns it into a notification; master has
+  the fix.
+- **Effect:** none on the result. The object, its named parts and their
+  positions load the same way (the object is placed by its min z, which is
+  the supports' 0).
+- **Not worked around:** avoiding it would mean writing
+  `Metadata/project_settings.config`, which replaces the user's printer,
+  process and filament presets.
+
 ## 12. Package layout
 
 ```
@@ -931,7 +956,18 @@ None. All six were resolved on 2026-10-19:
 
 New questions found during implementation go here:
 
-7. **Contacts in sub-1 mm crevices** (M3; addressed in M4). On layered sculpts
+7. **Nearly closed meshes (v0.7).** The inside test (§6.2) used to be off
+   for any target with an open or 4-face edge. A decimated sculpt (the YKS
+   Miniatures lich, `tests/fixtures/`) has 138 such edges of 149k, which
+   switched off the buried and bridging tests. 13% of its contacts were
+   then unreachable: tips on surfaces buried in other shells, where the
+   tip's ray back hits that shell.
+   - Targets with at most 0.5% bad edges now count as closed. The
+     winding-number test (majority of 3 rays) is not thrown off by
+     pinholes.
+   - The lich went from 250 of 1,891 contacts unreachable in 26.8 s to 33
+     of 1,474 in 13.1 s. It is a Blender regression test (≤ 4%).
+8. **Contacts in sub-1 mm crevices** (M3; addressed in M4). On layered sculpts
    (feathers, scales, cloth folds), some contacts sit in gaps too narrow
    for any branch to leave: under 1 mm between two parts of the model.
    With build-plate-only routing they stay unreachable. That was about 11%

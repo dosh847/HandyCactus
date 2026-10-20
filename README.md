@@ -60,6 +60,12 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
   the slicer layout: **Bambu Studio / OrcaSlicer** (default),
   **PrusaSlicer**, or **Generic**. STL writes one file, or one per part.
   **Bake Watertight** remeshes the supports into one closed shell.
+  **Add Riser** (on by default) merges a small 0.5 mm pad into each model part
+  at the supports' floor. That way a slicer will not drop the floating model
+  onto the bed, even after you split the object into parts.
+  Bambu Studio v02.08.02.60/.61 shows "The 3mf file has invalid config" for
+  any 3MF it did not write. That is a Bambu bug (fixed in v02.08.03.65): the
+  object and parts load normally, so click OK.
 
 Paint a vertex group named `HC_Force` to force supports on an area, or
 `HC_Block` to keep them off it.
@@ -99,7 +105,7 @@ pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.7.0.zip
+python tools/extension.py install-check dist/handycactus-0.8.0.zip
 ```
 
 ### Installing for development
@@ -111,3 +117,9 @@ For a live-editing setup, symlink the `handycactus/` folder into a local
 extensions repository, e.g.
 `~/.config/blender/5.2/extensions/user_default/handycactus`, then reload
 scripts (F3 → *Reload Scripts*).
+
+## Test models
+
+`tests/fixtures/yks-lich-base-54mm/`: lich sculpt by
+[YKS Miniatures](https://www.myminifactory.com/users/YKSMiniatures), included with
+permission for testing. The sculpt is not covered by this repository's licence.

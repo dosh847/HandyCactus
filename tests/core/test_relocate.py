@@ -120,3 +120,13 @@ def test_detection_covers_every_overhang_face():
         assert len(faces) and len(found.contacts)
         gap = ~heatmap.covered(mesh.face_centroids[faces], found.contacts.positions, params)
         assert gap.sum() == 0, (gap.sum(), len(faces))
+
+
+def test_a_pinhole_does_not_open_a_mesh():
+    box = voxels([((0, 0, 3), (6, 6, 9))])
+    mesh = combine([box])
+    assert mesh.is_nearly_closed(0)
+    holed = combine([TargetMesh("holed", box.verts, box.tris[1:])])  # one triangle missing
+    assert holed.non_manifold_edge_count(0) == 3 and holed.is_nearly_closed(0)
+    open_box = combine([TargetMesh("open", box.verts, box.tris[len(box.tris) // 10 :])])
+    assert not open_box.is_nearly_closed(0)  # a tenth of it missing

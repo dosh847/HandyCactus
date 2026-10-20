@@ -12,7 +12,7 @@ from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
 from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper
 
-from ..export.parts import Part, drop_degenerate, merge
+from ..export.parts import Part, add_risers, drop_degenerate, merge
 from ..export.stl import write_stl
 from ..export.threemf import write_3mf
 from .mesh_io import read_target, scene_mm_per_bu
@@ -29,9 +29,10 @@ def export_set(context) -> object | None:
 
 
 def collect_parts(
-    context, support, include_model=True, apply_modifiers=True, bake=False, voxel_mm=0.05
+    context, support, include_model=True, apply_modifiers=True, bake=False, voxel_mm=0.05, riser=False
 ) -> list[Part]:
-    """World-space mm meshes: each target (named after its object), then the supports."""
+    """World-space mm meshes: each target (named after its object), then the supports.
+    With `riser`, each target gets a riser pad on the supports' floor (export.parts)."""
     scale = scene_mm_per_bu(context.scene)
     depsgraph = context.evaluated_depsgraph_get()
     parts = []
@@ -44,7 +45,8 @@ def collect_parts(
         sup = _read(support, depsgraph, scale, evaluated=True)
     sup.name, sup.is_support = f"{support.name}", True
     parts.append(sup)
-    return [drop_degenerate(p) for p in parts]
+    parts = [drop_degenerate(p) for p in parts]
+    return add_risers(parts) if riser and include_model else parts
 
 
 def _read(ob, depsgraph, scale, evaluated: bool) -> Part:
@@ -130,6 +132,12 @@ class _ExportBase(ExportHelper):
         description="Export the targets as evaluated (modifiers applied)",
         default=True,
     )
+    riser: BoolProperty(
+        name="Add Riser",
+        description="Merge a small pad (4 mm, 0.5 mm tall) into each model part at the supports' floor, "
+        "so the slicer does not drop the floating model onto the bed, away from its supports",
+        default=True,
+    )
     bake: BoolProperty(
         name="Bake Watertight",
         description="Remesh the supports into one closed shell (slow). Slicers union overlapping "
@@ -151,7 +159,13 @@ class _ExportBase(ExportHelper):
     def parts(self, context) -> list[Part]:
         support = export_set(context)
         return collect_parts(
-            context, support, self.include_model, self.apply_modifiers, self.bake, self.voxel_size
+            context,
+            support,
+            self.include_model,
+            self.apply_modifiers,
+            self.bake,
+            self.voxel_size,
+            self.riser,
         )
 
 
