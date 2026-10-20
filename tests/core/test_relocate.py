@@ -6,12 +6,12 @@ import numpy as np
 
 from handycactus.core import detection as det
 from handycactus.core import graph as G
-from handycactus.core import reach, relocate, tips
+from handycactus.core import heatmap, reach, relocate, tips
 from handycactus.core.mesh_data import TargetMesh, combine
 from handycactus.core.params import Params
 from handycactus.core.spatial import NumpyObstacles
 
-from .shapes import cone_down, voxels
+from .shapes import cone_down, uv_sphere, voxels
 from .test_routing import generate
 
 
@@ -103,3 +103,20 @@ def test_route_with_retry_never_loses_tips():
     assert set(second.unreachable_tips) <= set(first.unreachable_tips)
     supported = np.unique(second.graph.tip[second.graph.kind == G.CONTACT])
     assert len(supported) + len(second.unreachable_tips) == len(t)
+
+
+def test_detection_covers_every_overhang_face():
+    """After the gap fill, every face left in the support mask has a contact that covers
+    it (within 1.5 × spacing, at most a layer above): the heatmap shows no gaps."""
+    params = Params()
+    shapes = [
+        [uv_sphere((0, 0, 14), 6, segments=48, rings=24)],
+        [voxels([((0, 0, 8), (9, 9, 10)), ((3, 3, 4), (5, 5, 8))])],  # a table on a leg
+    ]
+    for targets in shapes:
+        mesh = combine(targets)
+        found = det.detect(mesh, params, [None] * mesh.target_count)
+        faces = np.flatnonzero(found.support_faces)
+        assert len(faces) and len(found.contacts)
+        gap = ~heatmap.covered(mesh.face_centroids[faces], found.contacts.positions, params)
+        assert gap.sum() == 0, (gap.sum(), len(faces))

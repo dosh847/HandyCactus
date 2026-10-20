@@ -203,7 +203,18 @@ def detect(
     stats["samples_after_bridging"] = int(keep.sum())
     keep &= ~_buried(s_pos, mesh.face_normals[s_face], inside)
     stats["samples_after_inside"] = int(keep.sum())
+    rejected = s_pos[~keep]
     s_pos, s_face = s_pos[keep], s_face[keep]
+
+    # Gap fill: overhang faces no contact covers get one, lowest first. Faces next to a
+    # bridged (or buried) point need none and leave the support mask.
+    g_pos, g_face, bridged = _fill_gaps(
+        mesh, sample_faces, np.concatenate([forced_pos, s_pos]), rejected, spacing, params, inside, face_force
+    )
+    stats["gap_fill"] = int(len(g_pos))
+    stats["bridged_faces"] = int(bridged.sum())
+    s_pos, s_face = np.concatenate([s_pos, g_pos]), np.concatenate([s_face, g_face])
+    support &= ~bridged
 
     contacts = Contacts(
         positions=np.concatenate([forced_pos, s_pos]),
@@ -332,6 +343,62 @@ _BRIDGE_OPPOSITE = [
 ]  # fmt: skip
 
 
+GAP_FILL_ROUNDS = 8
+BRIDGED_FACTOR = 0.5  # × tip_spacing around a bridged (or buried) point: needs no support
+
+
+def _fill_gaps(mesh, faces_mask, contacts, rejected, spacing, params, inside, face_force):
+    """Contacts for overhang faces that no contact covers (spec 6.2 step 6).
+
+    Coverage is the heatmap's rule: a contact within COVERAGE_FACTOR × tip_spacing, at
+    most a layer above. A sample dropped as bridged or buried handles the faces within
+    BRIDGED_FACTOR × tip_spacing of it (same height rule) instead. Each round takes the
+    lowest unhandled faces, thinned to one per spacing; those that are not bridged or
+    buried become contacts, the others handle their neighbourhood.
+
+    Returns (positions, faces) of the added contacts and a mask (all faces) of the faces
+    handled by bridged or buried points, which need no support.
+    """
+    from .heatmap import covered, within  # heatmap imports this module
+
+    bridged = np.zeros(len(mesh.tris), dtype=bool)
+    faces = np.flatnonzero(faces_mask)
+    if len(faces) == 0:
+        return np.zeros((0, 3)), np.zeros(0, np.int64), bridged
+    centres = mesh.face_centroids[faces]
+    near = BRIDGED_FACTOR * params.tip_spacing
+
+    def by_dropped(idx, pts):
+        return within(centres[idx], pts, near, below=params.layer_height)
+
+    is_covered = covered(centres, np.asarray(contacts).reshape(-1, 3), params)
+    gaps = np.flatnonzero(~is_covered)
+    dropped = [np.asarray(rejected).reshape(-1, 3)]
+    gaps = gaps[~by_dropped(gaps, dropped[0])]
+    added_pos, added_face = [], []
+    for _ in range(GAP_FILL_ROUNDS):
+        if len(gaps) == 0:
+            break
+        order = gaps[np.argsort(np.round(centres[gaps, 2], 4), kind="stable")]
+        pick = order[_thin_out(centres[order], spacing[faces[order]])]
+        pts, pf = centres[pick], faces[pick]
+        ok = ~_anchored(pts, inside, params.max_bridge) | face_force[pf]
+        ok &= ~_buried(pts, mesh.face_normals[pf], inside)
+        added_pos.append(pts[ok])
+        added_face.append(pf[ok])
+        dropped.append(pts[~ok])
+        gaps = gaps[~covered(centres[gaps], pts[ok], params) & ~by_dropped(gaps, pts[~ok])]
+    all_added = np.concatenate(added_pos) if added_pos else np.zeros((0, 3))
+    # Bridged: handled by a dropped point and covered by no contact.
+    final_covered = is_covered | covered(centres, all_added, params)
+    dropped_all = np.concatenate(dropped)
+    idx = np.flatnonzero(~final_covered)
+    bridged[faces[idx[by_dropped(idx, dropped_all)]]] = True
+    if not added_pos:
+        return all_added, np.zeros(0, np.int64), bridged
+    return all_added, np.concatenate(added_face), bridged
+
+
 def _poisson_samples(mesh, faces_mask, spacing, seeds, rng):
     """Area-weighted dart throwing with a per-face spacing; returns (positions, faces)."""
     faces = np.flatnonzero(faces_mask)
@@ -348,7 +415,9 @@ def _poisson_samples(mesh, faces_mask, spacing, seeds, rng):
     pts = (1 - su)[:, None] * a + (su * (1 - v))[:, None] * b + (su * v)[:, None] * c
     # Lowest candidates first: a tip only holds up what is printed after it (at or above
     # its height), so contacts belong at the bottom of each region, with the rest above.
-    order = np.argsort(pts[:, 2], kind="stable")
+    # Rounded so float noise in the evaluated mesh (it differs between runs at ~1e-9 mm)
+    # cannot reorder near-equal heights and change the result.
+    order = np.argsort(np.round(pts[:, 2], 4), kind="stable")
     pts, pick = pts[order], pick[order]
     keep = _thin_out(pts, spacing[pick], seeds=seeds, seed_radius=float(spacing[faces].min()))
     return pts[keep], pick[keep]
