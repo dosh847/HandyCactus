@@ -13,7 +13,7 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Status
 
-**M4: manual editing and landing on the model.** The **HandyCactus** tab in the 3D viewport
+**M5: export.** The **HandyCactus** tab in the 3D viewport
 sidebar (N panel) has presets, every parameter and a **Units** setting
 (default: 1 Blender unit = 1 mm, which is how STLs import). Also in the tab:
 
@@ -54,11 +54,17 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
   **Ctrl+Shift+Z** undo and redo, Esc or right click exits. Every edit is
   one undo step and locks its tree.
 - **Lock All / Unlock All**: locked trees are kept when you Generate again.
+- **Export 3MF / Export STL** (in the support set's panel and File ›
+  Export): the model and its supports, in mm. 3MF keeps them as one object
+  with a part per mesh, so the supports can get their own settings. Choose
+  the slicer layout: **Bambu Studio / OrcaSlicer** (default),
+  **PrusaSlicer**, or **Generic**. STL writes one file, or one per part.
+  **Bake Watertight** remeshes the supports into one closed shell.
 
 Paint a vertex group named `HC_Force` to force supports on an area, or
 `HC_Block` to keep them off it.
 
-Next: 3MF/STL export (M5).
+Next: presets, docs, golden prints and the extensions.blender.org release (M6).
 
 ## Layout
 
@@ -93,7 +99,7 @@ pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.6.0.zip
+python tools/extension.py install-check dist/handycactus-0.7.0.zip
 ```
 
 ### Installing for development

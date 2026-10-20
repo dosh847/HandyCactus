@@ -1,7 +1,7 @@
-# HandyCactus — Tree Supports for FDM in Blender (Spec v0.5)
+# HandyCactus — Tree Supports for FDM in Blender (Spec v0.6)
 
-> Status: v0.5. Fewer unreachable contacts: self-supporting patches, gap fill, tip
-> relocation and a routing retry (2026-10-20). v0.4 added the tree shape rules from slicer
+> Status: v0.6. M5: 3MF and STL export (2026-10-20). v0.5: fewer unreachable contacts
+> (self-supporting patches, gap fill, tip relocation, routing retry). v0.4 added the tree shape rules from slicer
 > research; v0.3 landing and manual editing (M4).
 
 HandyCactus is a Blender extension that generates **resin-style tree supports
@@ -761,6 +761,41 @@ dependencies.
 **Export STL** writes binary STL in mm, with one of two options:
 - *merged*: all targets and supports in one file;
 - *separate*: one file per target plus `_supports`.
+
+**As built in M5** (`handycactus/export/`, pure Python + numpy;
+`blender/export_ops.py`):
+- **Where:** the support set's panel (**Export 3MF** / **Export STL**) and
+  File › Export. They export the set of the active object (the supports,
+  or one of their targets).
+- **Parts:** each target is named after its object, then the supports,
+  named after the supports object. Everything is in world-space mm (the
+  Units setting applies). Degenerate triangles are dropped.
+  - Options: **Include Model** (on), **Apply Modifiers** (on), and **Bake
+    Watertight** with a voxel size (0.05 mm).
+  - The bake runs Mesh to Volume → Volume to Mesh on a temporary copy of
+    the supports.
+- **Slicer layouts (3MF).** Slicers store multi-part objects differently.
+  This was read from their importers, since no slicer could be run in the
+  build environment (downloads are blocked there):
+  - **Bambu Studio / OrcaSlicer** (default): components plus
+    `Metadata/model_settings.config`, with `<object id=parent>` and one
+    `<part id=component subtype="normal_part">` per part. OrcaSlicer reads
+    that file from any vendor's 3MF, and `_generate_volumes_new` turns each
+    component into a part.
+  - **PrusaSlicer**: one mesh object holding every part back to back, plus
+    `Metadata/Slic3r_PE_model.config` with one `<volume firstid lastid>`
+    (`volume_type` ModelPart) per part. PrusaSlicer turns components into
+    *separate objects* (`_create_object_instance`) and drops each onto the
+    bed on its own. That would lift the model off its supports, so the
+    components layout cannot be used for it.
+  - **Generic 3MF**: components only.
+- **Validation:** tests read every layout back with lib3mf 2.5 (the 3MF
+  Consortium's library) in strict mode: no warnings, the right meshes,
+  names and triangle counts, and each part manifold and oriented.
+- **Speed:** writing 1.2M triangles takes about 6 s (deflate level 1; level
+  6 took 3.4 s more for a 20% smaller file). STL takes 2 s.
+- **Still to do (§13):** open the exports in Bambu Studio, OrcaSlicer,
+  PrusaSlicer and Cura, and slice them.
 
 ## 12. Package layout
 

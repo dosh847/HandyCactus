@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "handycactus"
-version = "0.6.0"
+version = "0.7.0"
 name = "HandyCactus"
 tagline = "Resin-style tree supports for FDM miniature printing"
 maintainer = "dosh847"
@@ -17,7 +17,8 @@ license = [
   "SPDX:GPL-3.0-or-later",
 ]
 
-# Add `files` permission when 3MF/STL export lands (M5).
+[permissions]
+files = "Export the model and supports as 3MF or STL"
 
 [build]
 paths_exclude_pattern = [

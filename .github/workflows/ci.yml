@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install numpy pytest ruff==0.16.8
+      - run: pip install numpy pytest ruff==0.16.8 lib3mf==2.5.0
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest tests/core
@@ -34,7 +34,7 @@ jobs:
       - name: Install Mesa EGL (offscreen GPU for the overlay draw test)
         run: sudo apt-get update -q && sudo apt-get install -y -q libegl1 libegl-mesa0 libgl1-mesa-dri
       - name: Install Blender as a Python module
-        run: pip install bpy==5.2.0 pytest
+        run: pip install bpy==5.2.0 pytest lib3mf==2.5.0
       - run: pytest tests -rs
       - run: python tools/extension.py validate
       - run: python tools/extension.py build --output-dir dist

@@ -87,6 +87,7 @@ class HANDYCACTUS_PT_main(_HCPanel, Panel):
             box.label(text="Targets: " + ", ".join(ob.name for ob in info.target_objects()))
             _draw_editing(box, info)
             _draw_checks(box, info)
+            _draw_export(box)
 
         for problem in settings_to_params(settings).problems():
             layout.label(text=problem, icon="ERROR")
@@ -100,6 +101,12 @@ def _draw_editing(layout, info) -> None:
     row.operator("handycactus.lock_all", text="Unlock All", icon="UNLOCKED").locked = False
     if info.locked_count:
         layout.label(text=f"{info.locked_count} locked tree(s) kept on Generate", icon="LOCKED")
+
+
+def _draw_export(layout) -> None:
+    row = layout.row(align=True)
+    row.operator("handycactus.export_3mf", icon="EXPORT")
+    row.operator("handycactus.export_stl", icon="EXPORT")
 
 
 def _draw_checks(layout, info) -> None:
