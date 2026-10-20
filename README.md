@@ -120,7 +120,7 @@ pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.10.0.zip
+python tools/extension.py install-check dist/handycactus-0.10.1.zip
 ```
 
 ### Installing for development
