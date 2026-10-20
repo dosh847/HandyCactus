@@ -22,6 +22,7 @@ FLAG_MANUAL = 1
 FLAG_OVERRIDE = 2
 FLAG_CHECK_FAILED = 4
 FLAG_UNREACHABLE = 8
+FLAG_THICK_LANDING = 16  # on a LANDING node: the tree was slimmed to land (no way to the bed)
 
 FOOT_Z_TOLERANCE = 1e-3  # mm
 

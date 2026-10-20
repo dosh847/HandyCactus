@@ -74,6 +74,7 @@ def merge_routed(
         top = float(new.pos[knuckles, 2].max()) if knuckles.any() else float(new.pos[local, 2])
         _thicken_below(merged, target, top, params)
     merged.renumber_trees()
+    merged.sphere = np.minimum(merged.sphere, np.maximum(merged.pos[:, 2], 0.0))  # never into the bed
     is_new = np.zeros(len(merged), bool)
     is_new[n0:] = True
     return merged, is_new
@@ -129,7 +130,7 @@ def add_tip(
     tips = build_tips(contacts, tip_params, obstacles)
     if not tips.ok[0]:
         return EditResult(graph, False, "No room for a tip here")
-    routed = route(tips, tip_params, obstacles, attach_to=graph)
+    routed = route(tips, tip_params, obstacles, attach_to=graph, avoidance=None)  # interactive: fast
     if len(routed.unreachable_tips):
         return EditResult(graph, False, "This tip cannot reach the bed or land on the model")
     merged, is_new = merge_routed(graph, routed, tip_params)

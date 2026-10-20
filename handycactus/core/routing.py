@@ -19,7 +19,19 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .graph import BRANCH, CONTACT, FOOT, JUNCTION, KNUCKLE, LANDING, ROOT_KINDS, GraphBuilder, SupportGraph
+from .avoidance import Avoidance
+from .graph import (
+    BRANCH,
+    CONTACT,
+    FLAG_THICK_LANDING,
+    FOOT,
+    JUNCTION,
+    KNUCKLE,
+    LANDING,
+    ROOT_KINDS,
+    GraphBuilder,
+    SupportGraph,
+)
 from .params import Params, radius_at
 from .smoothing import smooth
 from .spatial import Obstacles
@@ -37,6 +49,8 @@ AVOID_AZIMUTHS = 16
 # Trunks run straight up from the foot for this long (Orca keeps trunks vertical near
 # the bed): no leaning toward merge partners below it, and smoothing leaves it alone.
 TRUNK_BASE_MM = 0.4
+JUNCTION_PROJECTIONS = 8
+FOOT_FLARE = 1.3  # a foot is at least this × its trunk's radius
 DECIMATE_TOLERANCE = 0.03  # mm a collapsed segment may stray (or fatten) past a skipped node
 
 
@@ -55,16 +69,24 @@ class _Head:
     pos: np.ndarray
     radius: float
     top: float = 0.0  # height of the highest knuckle this head carries (sets its radius)
+    tips: int = 1  # how many tips this head carries (sets its radius too)
     awake: bool = False
     prev: np.ndarray | None = None  # position before this level's move
     reach: float = 0.0  # horizontal reach of this level's move (cone limit)
     blocked: bool = False  # the model is straight below: escaping, not merging
     escape: np.ndarray | None = None  # unit direction of a straight free path to the bed
     landing: np.ndarray | None = None  # model surface point this head is heading for
+    steered: bool = False  # this level's target was redirected to keep the bed reachable
+    mate: _Head | None = None  # the head this one is walking to meet (kept until they merge)
+    host: _Head | None = None  # a free head this blocked head is steering to, to merge into
 
 
 def route(
-    tips: Tips, params: Params, obstacles: Obstacles, attach_to: SupportGraph | None = None
+    tips: Tips,
+    params: Params,
+    obstacles: Obstacles,
+    attach_to: SupportGraph | None = None,
+    avoidance: Avoidance | str | None = "auto",
 ) -> RoutingResult:
     """Route tips to the bed (or the model). With `attach_to`, heads may also end by joining
     a reachable unlocked branch or junction of that existing graph (incremental routing,
@@ -89,6 +111,7 @@ def route(
     tan_pref = np.tan(np.radians(min(params.preferred_branch_angle, params.max_branch_angle)))
     floor = max(params.foot_height, 0.0)
     level = max((h.pos[2] for h in heads), default=floor)
+    av = build_avoidance(obstacles, tips, params) if avoidance == "auto" else avoidance
 
     anchors = _attach_candidates(attach_to)
     attachments: list[tuple[int, int]] = []
@@ -104,13 +127,13 @@ def route(
                     attachments.append((h.node, target))
                     heads.remove(h)
         awake = [h for h in heads if h.awake]
-        targets = _desired_xy(awake, heads, params, obstacles, tan, new_level)
+        targets = _desired_xy(awake, heads, params, obstacles, tan, new_level, av)
         moved: list[_Head] = []
         landing = bool(params.land_on_model)
         for h, target_xy in zip(awake, targets, strict=True):
             if landing and h.landing is not None and _land(b, h, h.landing, params, obstacles, tan):
                 continue  # done: this head ends on the model
-            new_pos = _move(h, target_xy, new_level, params, obstacles, tan, tan_pref)
+            new_pos = _move(h, target_xy, new_level, params, obstacles, tan, tan_pref, av)
             if new_pos is None:
                 spot = (
                     _find_landing(h.pos, obstacles, tan, LANDING_REACH * params.tip_length)
@@ -125,18 +148,23 @@ def route(
             # Orca: no jump at merges), but never grows into the hard clearance next to the
             # model, and never shrinks going down.
             room = float(obstacles.nearest_distance(new_pos[None])[0]) - HARD_CLEARANCE
-            grown = _radius_at(params, h.top - new_level)
-            h.radius = max(min(grown, room), min(h.radius, grown), params.min_radius)
+            grown = _radius_at(params, h.top - new_level, h.tips)
+            radius = max(min(grown, room), min(h.radius, grown), params.min_radius)
+            if av is not None and radius > h.radius and not h.blocked:
+                # Never thicken past the point where the bed is no longer reachable.
+                if not av.can_reach_bed(new_pos, radius)[0]:
+                    radius = h.radius
+            h.radius = radius
             h.prev, h.reach = h.pos, dz * tan
             h.pos = new_pos
             moved.append(h)
         stuck = {id(h) for h in awake} - {id(h) for h in moved}
         heads = [h for h in heads if id(h) not in stuck]
-        _merge_and_extend(b, [h for h in heads if h.awake], heads, params, obstacles)
+        _merge_and_extend(b, [h for h in heads if h.awake], heads, params, obstacles, av)
         level = new_level
 
     for h in heads:  # flared feet
-        foot_r = max(params.foot_radius, h.radius)
+        foot_r = max(params.foot_radius, FOOT_FLARE * h.radius)  # always wider than the trunk
         if floor > 1e-9:
             foot = b.add((h.pos[0], h.pos[1], 0.0), FOOT, foot_r)
             b.set_parent(h.node, foot)
@@ -147,6 +175,7 @@ def route(
     attached = np.zeros(len(graph), bool)
     for node, _ in attachments:
         attached[node] = True
+    _slim_landing_trees(graph, params)
     keep = _rooted(graph, attached)  # drops stuck trees
     remap = np.cumsum(keep) - 1
     attachments = [(int(remap[n]), t) for n, t in attachments if keep[n]]
@@ -158,12 +187,34 @@ def route(
     graph.renumber_trees()
     junction = graph.kind == JUNCTION
     graph.sphere[junction] = graph.radius[junction]
+    # The ball above a landing tip fills the joint between the branch and the tip, which
+    # leans another way: as wide as the branch (a tip-sized ball left a wedge-shaped gap).
+    above_landing = np.flatnonzero((graph.parent >= 0) & (graph.kind[np.maximum(graph.parent, 0)] == LANDING))
+    graph.sphere[above_landing] = graph.radius[above_landing]
     # A ball never reaches below the bed.
     graph.sphere = np.minimum(graph.sphere, np.maximum(graph.pos[:, 2], 0.0))
 
     supported = np.unique(graph.tip[graph.kind == CONTACT])
     all_tips = np.arange(len(tips))
     return RoutingResult(graph, np.setdiff1d(all_tips, supported), attachments)
+
+
+def _slim_landing_trees(graph: SupportGraph, params: Params) -> None:
+    """Trees standing on the model are at most max_landing_diameter thick. A landing only
+    happens with no way to the bed, so a thicker tree is slimmed to land anyway and its
+    landing is flagged (checks report it as a warning)."""
+    landings = np.flatnonzero(graph.kind == LANDING)
+    if len(landings) == 0:
+        return
+    cap = params.max_landing_diameter / 2
+    roots = graph.roots()
+    for land in landings:
+        tree = roots == land
+        tree[land] = False  # the landing tip keeps its contact radius
+        if (graph.radius[tree] > cap + 1e-9).any():
+            graph.radius[tree] = np.minimum(graph.radius[tree], cap)
+            graph.sphere[tree] = np.minimum(graph.sphere[tree], cap)
+            graph.flags[land] |= FLAG_THICK_LANDING
 
 
 def _attach_candidates(graph: SupportGraph | None) -> np.ndarray | None:
@@ -209,7 +260,19 @@ def _remap_after_decimate(graph: SupportGraph, attachments):
     return [(int(r), t) for r, (_, t) in zip(roots, sorted(attachments), strict=True)]
 
 
-def _desired_xy(awake, heads, params, obstacles, tan, new_level) -> list[np.ndarray]:
+def build_avoidance(obstacles, tips, params) -> Avoidance | None:
+    """The avoidance grid for these tips, when the obstacles can report column occupancy
+    and their bounds (else None: routing falls back to straight escape paths)."""
+    bounds = getattr(obstacles, "bounds", None)
+    if bounds is None or not hasattr(obstacles, "column_occupancy") or not tips.ok.any():
+        return None
+    lo = np.minimum(bounds[0][:2], tips.knuckle[tips.ok, :2].min(axis=0))
+    hi = np.maximum(bounds[1][:2], tips.knuckle[tips.ok, :2].max(axis=0))
+    top = float(tips.knuckle[tips.ok, 2].max())
+    return Avoidance(obstacles, lo, hi, top, params)
+
+
+def _desired_xy(awake, heads, params, obstacles, tan, new_level, av=None) -> list[np.ndarray]:
     """Where each awake head would like to go (xy), before collision checks.
 
     A head with the model straight below it is *blocked*: it follows a
@@ -224,6 +287,11 @@ def _desired_xy(awake, heads, params, obstacles, tan, new_level) -> list[np.ndar
     hit = obstacles.ray_distance(a_pos, down, float(a_pos[:, 2].max()) + 1.0)
     for h, d in zip(awake, hit, strict=True):
         h.blocked = bool(np.isfinite(d) and d < h.pos[2])
+        if av is not None and h.blocked:
+            # With the model below, blocked means no way to the bed at all (the grid's
+            # say); with nothing below, the head is free whatever the (conservative) grid
+            # says next to the model.
+            h.blocked = not bool(av.can_reach_bed(h.pos, h.radius)[0])
 
     all_pos = np.array([h.pos for h in heads])
     free = np.array([not h.blocked for h in heads])
@@ -236,14 +304,40 @@ def _desired_xy(awake, heads, params, obstacles, tan, new_level) -> list[np.ndar
     d_xy = np.where(candidate, d_xy, np.inf)
     partner = np.argmin(d_xy, axis=1)
     has_partner = np.isfinite(d_xy[np.arange(len(awake)), partner])
+    # Mutual pairs first, closest first: both heads of a pair aim for the same midpoint, so
+    # they meet exactly and merge. (Nearest-partner choices alone are not mutual; in a
+    # bundle each chases another and they run down side by side, never meeting.)
+    mate = _pair_up(awake, awake_idx, heads, d_xy)
+    # Trapped heads (no way to the bed) look for each other: they merge into fewer trees
+    # before standing on the model.
+    trapped = ~free
+    d_trap = np.linalg.norm(a_pos[:, None, :2] - all_pos[None, :, :2], axis=2)
+    cand_trap = below_or_level & ~same & trapped[None, :] & (d_trap <= params.merge_distance)
+    d_trap = np.where(cand_trap, d_trap, np.inf)
+    trap_partner = np.argmin(d_trap, axis=1)
+    has_trap_partner = np.isfinite(d_trap[np.arange(len(awake)), trap_partner])
 
     base = _base_height(params)
     out = []
     for i, h in enumerate(awake):
         if h.blocked:
+            # The grid is a little conservative: a straight escape is still worth a look. A
+            # free branch to join cannot exist when the grid says no way to the bed.
             direction = _escape(h, obstacles, tan)
             if h.escape is not None:
+                h.landing = h.host = None
+            elif av is None and (host := _host(h, heads, params, obstacles, tan)) is not None:
+                # No straight way to the bed, but a free branch it can reach: join that tree
+                # (Bambu/Orca trees funnel trapped branches into trunks rather than landing).
                 h.landing = None
+                out.append(host.pos[:2].copy())
+                continue
+            elif has_trap_partner[i] and h.pos[2] - new_level > 0:
+                # Another trapped head nearby: meet it, and land together later.
+                other = heads[trap_partner[i]]
+                h.landing = None  # found again from wherever the merged head ends up
+                out.append((h.pos[:2] + other.pos[:2]) / 2 if other.awake else other.pos[:2].copy())
+                continue
             elif params.land_on_model:
                 # No way to the bed: head for a spot on the model to land on.
                 if h.landing is None:
@@ -256,17 +350,102 @@ def _desired_xy(awake, heads, params, obstacles, tan, new_level) -> list[np.ndar
         elif new_level < base:
             h.escape = None  # the vertical trunk base: straight down
             out.append(h.pos[:2].copy())
+        elif mate[i] >= 0:
+            h.escape = None
+            out.append((h.pos[:2] + heads[mate[i]].pos[:2]) / 2)  # it aims here too
         elif has_partner[i]:
             h.escape = None
             other = heads[partner[i]]
-            if other.awake:  # meet halfway; the other head walks toward us too
-                out.append((h.pos[:2] + other.pos[:2]) / 2)
+            if other.awake:  # it has a mate of its own: walk toward it, it may wait for us
+                out.append(other.pos[:2].copy())
             else:
                 out.append(other.pos[:2].copy())
         else:
             h.escape = None
             out.append(h.pos[:2].copy())
+    if av is not None:
+        # Free heads go where they wish only as far as the bed stays reachable from there.
+        for i, h in enumerate(awake):
+            h.steered = False
+            # Steer only heads the grid can speak for (it is conservative next to the model).
+            # Mated heads are not steered apart: the merged head steers on the next level.
+            mated = mate[i] >= 0 and not h.blocked
+            if not h.blocked and not mated and new_level >= base and av.can_reach_bed(h.pos, h.radius)[0]:
+                dz = h.pos[2] - new_level
+                steered = av.steer(h.pos, new_level, out[i], dz * tan, h.radius)
+                if steered is not None:
+                    h.steered = bool(np.linalg.norm(steered - out[i]) > 1e-6)
+                    out[i] = steered
     return out
+
+
+def _pair_up(awake, awake_idx: np.ndarray, heads, d_xy: np.ndarray) -> np.ndarray:
+    """Mutual pairing of awake heads (d_xy: awake x all heads, inf where not a candidate).
+    Pairs from earlier levels are kept while still valid, so they keep walking toward each
+    other until they meet; the rest pair greedily, closest first. Returns, per awake head,
+    its mate's index in `heads`, or -1 (and records it in head.mate)."""
+    n = len(awake_idx)
+    mate = np.full(n, -1)
+    slot = {id(h): i for i, h in enumerate(awake)}
+    sub = d_xy[:, awake_idx]  # awake x awake
+    for i, h in enumerate(awake):
+        j = slot.get(id(h.mate)) if h.mate is not None else None
+        if j is not None and mate[i] < 0 and mate[j] < 0 and awake[j].mate is h and np.isfinite(sub[i, j]):
+            mate[i], mate[j] = awake_idx[j], awake_idx[i]
+    iu = np.argwhere(np.isfinite(sub))
+    if len(iu):
+        order = np.argsort(sub[iu[:, 0], iu[:, 1]], kind="stable")
+        for a, b in iu[order]:
+            if a == b or mate[a] >= 0 or mate[b] >= 0:
+                continue
+            mate[a], mate[b] = awake_idx[b], awake_idx[a]
+    for i, h in enumerate(awake):
+        h.mate = heads[mate[i]] if mate[i] >= 0 else None
+    return mate
+
+
+HOST_CANDIDATES = 8  # nearest free heads checked for a clear way to them
+HOST_SAMPLES = 6  # clearance samples along the way
+
+
+def _host(h, heads, params, obstacles, tan):
+    """A free head below `h` that `h` can reach inside its cone with a clear line, nearest
+    first; keeps the current host while it is still free and in reach."""
+    base = _base_height(params)
+    if (
+        h.host is not None
+        and h.host in heads
+        and not h.host.blocked
+        and _can_reach(h, h.host, base, obstacles, tan)
+    ):
+        return h.host
+    h.host = None
+    free = [o for o in heads if o is not h and not o.blocked and o.pos[2] <= h.pos[2] + 1e-9]
+    if not free:
+        return None
+    pos = np.array([o.pos for o in free])
+    d = np.linalg.norm(pos[:, :2] - h.pos[:2], axis=1)
+    reach = (h.pos[2] - base) * tan
+    for k in np.argsort(d)[:HOST_CANDIDATES]:
+        if d[k] > reach:
+            break
+        if _can_reach(h, free[k], base, obstacles, tan):
+            h.host = free[k]
+            return h.host
+    return None
+
+
+def _can_reach(h, other, base, obstacles, tan) -> bool:
+    """Is there a straight branch, inside the cone, from `h` to the column above `other`
+    that keeps the hard clearance?"""
+    d = float(np.linalg.norm(other.pos[:2] - h.pos[:2]))
+    meet_z = h.pos[2] - d / max(tan, 1e-9)
+    if meet_z < max(other.pos[2], base) - 1e-9:
+        return False
+    end = np.array([other.pos[0], other.pos[1], meet_z])
+    t = np.linspace(0.0, 1.0, HOST_SAMPLES + 1)[1:]
+    samples = h.pos + (end - h.pos) * t[:, None]
+    return bool(np.all(obstacles.nearest_distance(samples) >= h.radius + HARD_CLEARANCE))
 
 
 def _base_height(params: Params) -> float:
@@ -354,18 +533,19 @@ def _cone_directions(max_angle_deg: float) -> np.ndarray:
 _ESCAPE_DIRS_CACHE: dict[float, np.ndarray] = {}
 
 
-def _radius_at(params: Params, below_top: float) -> float:
-    """Branch radius at `below_top` mm under the highest tip it carries."""
-    return radius_at(params, below_top)
+def _radius_at(params: Params, below_top: float, tips: int) -> float:
+    """Branch radius at `below_top` mm under the highest of the `tips` it carries."""
+    return radius_at(params, below_top, tips)
 
 
-def _move(h, target_xy, new_level, params, obstacles, tan, tan_pref) -> np.ndarray | None:
+def _move(h, target_xy, new_level, params, obstacles, tan, tan_pref, av=None) -> np.ndarray | None:
     """This level's position for a head. Ordinary moves (straight down, toward a merge
     partner) lean at most the preferred angle; escaping, landing and dodging the model
     may use the full branch angle (PrusaSlicer/Orca's slow and fast moves)."""
     dz = h.pos[2] - new_level
     reach = dz * tan
-    steering = h.blocked or h.landing is not None
+    # Redirected moves may use the full branch angle: the reachable path can need it.
+    steering = h.blocked or h.landing is not None or h.steered
     want = target_xy - h.pos[:2]
     dist = np.linalg.norm(want)
     wish = reach if steering else dz * tan_pref
@@ -388,6 +568,11 @@ def _move(h, target_xy, new_level, params, obstacles, tan, tan_pref) -> np.ndarr
     cands = np.vstack([desired, np.column_stack([h.pos[:2] + offsets, np.full(len(offsets), new_level)])])
     d = np.concatenate([[d_new], obstacles.nearest_distance(cands[1:])])
     ok = (d >= need) | (d >= min(d_old, need))
+    if av is not None and not h.blocked and av.can_reach_bed(h.pos, h.radius)[0]:
+        # Among clear moves, keep the bed reachable if any of them does.
+        stays = av.can_reach_bed(cands, h.radius)
+        if (ok & stays).any():
+            ok &= stays
     if ok.any():
         score = np.linalg.norm(cands[:, :2] - desired[:2], axis=1)
         score[~ok] = np.inf
@@ -401,7 +586,7 @@ def _move(h, target_xy, new_level, params, obstacles, tan, tan_pref) -> np.ndarr
     return None
 
 
-def _merge_and_extend(b: GraphBuilder, awake, heads, params, obstacles) -> None:
+def _merge_and_extend(b: GraphBuilder, awake, heads, params, obstacles, av=None) -> None:
     """Add this level's nodes: junctions for touching heads, plain branch nodes otherwise."""
     if not awake:
         return
@@ -421,27 +606,73 @@ def _merge_and_extend(b: GraphBuilder, awake, heads, params, obstacles) -> None:
     reach = np.array([h.reach for h in awake]) + 1e-6
 
     def junction(idx):
+        """The area-weighted mean of the members, moved to the nearest point every member
+        can reach from its previous node inside its cone (alternating projections onto
+        those discs); within_cone then says whether such a point exists."""
         w = rad[idx] ** 2
-        return (pos[idx] * w[:, None]).sum(axis=0) / w.sum()
+        p = (pos[idx] * w[:, None]).sum(axis=0) / w.sum()
+        xy = p[:2].copy()
+        for _ in range(JUNCTION_PROJECTIONS):
+            moved = False
+            for k in idx:
+                v = xy - prev[k]
+                n = float(np.linalg.norm(v))
+                if n > reach[k]:
+                    xy = prev[k] + v / n * reach[k]
+                    moved = True
+            if not moved:
+                break
+        return np.array([xy[0], xy[1], p[2]])
 
     def within_cone(idx, p):
         # Every member must reach the junction from its previous node inside its cone.
-        return bool(np.all(np.linalg.norm(prev[idx] - p[:2], axis=1) <= reach[idx]))
+        return bool(np.all(np.linalg.norm(prev[idx] - p[:2], axis=1) <= reach[idx] + 1e-6))
 
     def merged_radius(idx):
-        # The thicker branch's radius: the radius already follows the tallest tip carried.
-        return min(params.max_radius, float(rad[idx].max()) * params.merge_growth)
+        # What the merged branch would carry, but never thinner than its thickest member.
+        top = max(awake[i].top for i in idx)
+        n = sum(awake[i].tips for i in idx)
+        r = max(float(rad[idx].max()), _radius_at(params, top - float(pos[idx, 2].mean()), n))
+        return min(params.max_radius, r * params.merge_growth)
+
+    def fitted_radius(idx, p):
+        """The merged radius, thinned to the room at the junction (like a single head's
+        growth) but never below its thickest member; None if even that does not fit or
+        the members could reach the bed and the merged branch could not."""
+        thickest = float(rad[idx].max())
+        room = float(obstacles.nearest_distance(p[None])[0]) - HARD_CLEARANCE
+        if room < thickest:
+            return None
+        r = max(thickest, min(merged_radius(idx), room))
+        # Keep the bed reachable (by the grid) if the thickest member has it there.
+        if av is not None and not blocked[idx].all() and av.can_reach_bed(p, thickest)[0]:
+            while not av.can_reach_bed(p, r)[0]:
+                if r <= thickest + 1e-9:
+                    return None
+                r = max(thickest, r - 0.25)
+        return r
 
     def has_room(idx, p):
-        # The merged branch must keep the hard clearance at the junction.
-        return float(obstacles.nearest_distance(p[None])[0]) >= merged_radius(idx) + HARD_CLEARANCE
+        return fitted_radius(idx, p) is not None
 
     blocked = np.array([h.blocked for h in awake])
+    # A blocked head may merge into the free head it is steering to.
+    hosted = np.zeros((len(awake), len(awake)), bool)
+    index = {id(h): i for i, h in enumerate(awake)}
+    for i, h in enumerate(awake):
+        if h.host is not None and id(h.host) in index:
+            j = index[id(h.host)]
+            hosted[i, j] = hosted[j, i] = True
     # No merging inside the vertical trunk base: every trunk stands straight on its own
     # foot (a junction there would put its ball, and a leaning branch, into the bed).
     in_base = pos[:, 2] < _base_height(params) - 1e-9
     blocked = blocked | in_base
-    pairs = np.argwhere(np.triu((d <= limit) & ~blocked[:, None] & ~blocked[None, :], k=1))
+    trapped = np.array([h.blocked for h in awake])
+    both_trapped = trapped[:, None] & trapped[None, :]
+    free_pair = (~blocked[:, None] & ~blocked[None, :]) | (
+        (hosted | both_trapped) & ~in_base[:, None] & ~in_base[None, :]
+    )
+    pairs = np.argwhere(np.triu((d <= limit) & free_pair, k=1))
     for i, j in sorted(pairs.tolist(), key=lambda ij: d[ij[0], ij[1]]):
         gi, gj = find(i), find(j)
         if gi == gj:
@@ -463,13 +694,15 @@ def _merge_and_extend(b: GraphBuilder, awake, heads, params, obstacles) -> None:
             h.node = node
             continue
         p = junction(np.array(idx))
-        r = merged_radius(np.array(idx))
+        r = fitted_radius(np.array(idx), p)
+        r = float(rad[idx].max()) if r is None else r
         node = b.add(p, JUNCTION, r)
         for i in idx:
             b.set_parent(awake[i].node, node)
         keep = awake[idx[0]]
         keep.node, keep.pos, keep.radius = node, p, r
         keep.top = max(awake[i].top for i in idx)
+        keep.tips = sum(awake[i].tips for i in idx)
         dead.update(id(awake[i]) for i in idx[1:])
     heads[:] = [h for h in heads if id(h) not in dead]
 

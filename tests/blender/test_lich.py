@@ -6,6 +6,7 @@ unreachable (250 of 1,891)."""
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 bpy = pytest.importorskip("bpy")
@@ -33,6 +34,16 @@ def test_lich_contacts_reach(lich):
     result = pipeline.generate(bpy.context, [lich])
     total = result.tips + result.unreachable
     assert result.unreachable <= 0.04 * total, (result.unreachable, total)
+    # Bambu-like trees (v0.9): trapped branches merge, free ones steer around the model by
+    # the avoidance grid. Was 486 landings and 64,600 mm³ of support.
+    info = result.support.handycactus_set
+    assert info.landing_count <= 380, info.landing_count
+    g = pipeline.read_support_graph(bpy.context, result.support)
+    e = g.parent >= 0
+    length = np.linalg.norm(g.pos[e] - g.pos[g.parent[e]], axis=1)
+    r = (g.radius[e] + g.radius[g.parent[e]]) / 2
+    volume = float((np.pi * r**2 * length).sum())
+    assert volume < 40000, volume
 
 
 def test_lich_supports_stay_above_the_bed(lich):

@@ -34,7 +34,8 @@ def test_defaults_are_the_42mm_02_nozzle_preset():
     assert p.contact_diameter == 0.3
     assert p.tip_length == 1.5
     assert p.knuckle_diameter == 0.6
-    assert p.max_radius == 2.0
+    assert p.max_radius == 3.0  # 6 mm trunks (load-based radius keeps lone branches thin)
+    assert p.max_landing_diameter == 4.0 and p.merge_distance == 6.0
     assert p.foot_radius == 1.5
     assert PRESETS_BY_ID[DEFAULT_PRESET_ID].params() == p
 
@@ -56,7 +57,7 @@ def test_preset_table_values():
 
 
 def test_problems_reports_ranges_and_inconsistencies():
-    p = Params().with_values({"tip_spacing": 50.0, "min_radius": 3.0, "min_tip_length": 2.0})
+    p = Params().with_values({"tip_spacing": 50.0, "min_radius": 4.0, "min_tip_length": 2.0})
     problems = p.problems()
     assert any("Tip Spacing" in m for m in problems)
     assert "Min Radius is larger than Max Radius" in problems

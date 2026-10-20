@@ -81,11 +81,19 @@ def test_feet_have_the_foot_radius(scene):
     (support,) = supports_in_scene()
     g = pipeline.read_support_graph(bpy.context, support)
     v = evaluated_verts(support)
-    foot = g.pos[np.flatnonzero(g.kind == G.FOOT)[0]]
+    feet = np.flatnonzero(g.kind == G.FOOT)
+    gaps = np.linalg.norm(g.pos[feet, None, :2] - g.pos[None, feet, :2], axis=2) + np.eye(len(feet)) * 99
+    i = feet[int(np.argmax(gaps.min(axis=1)))]  # the most isolated foot: no neighbour's rim nearby
+    want = g.radius[i]
+    trunk = g.radius[np.flatnonzero(g.parent == i)[0]]
+    assert want >= Params().foot_radius and want >= 1.3 * trunk - 1e-6  # flares past its trunk
     on_bed = v[np.abs(v[:, 2]) < 1e-3]
-    d = np.linalg.norm(on_bed[:, :2] - foot[:2], axis=1)
-    r = d[d < 1.2 * Params().foot_radius].max()  # this foot's rim (neighbours lie farther out)
-    assert r == pytest.approx(Params().foot_radius, rel=0.05)
+    to_feet = np.linalg.norm(on_bed[:, None, :2] - g.pos[None, feet, :2], axis=2)
+    mine = np.argmin(to_feet, axis=1) == np.flatnonzero(feet == i)[0]  # closer to this foot
+    r = to_feet[mine, np.flatnonzero(feet == i)[0]].max()  # this foot's rim
+    # At least the foot; a little more where the base of a leaning tube above it is pressed
+    # onto the bed (the node group flattens anything below z = 0).
+    assert want * 0.95 <= r <= want * 1.15
 
 
 def test_generate_again_rebuilds_the_same_object(scene):

@@ -14,7 +14,7 @@ import numpy as np
 from .editing import merge_routed
 from .graph import CONTACT
 from .params import Params
-from .routing import RoutingResult, route
+from .routing import RoutingResult, build_avoidance, route
 from .spatial import Obstacles
 from .tips import Tips
 
@@ -29,12 +29,17 @@ def subset_tips(tips: Tips, idx: np.ndarray) -> Tips:
 
 
 def route_with_retry(tips: Tips, params: Params, obstacles: Obstacles) -> RoutingResult:
-    first = route(tips, params, obstacles)
+    av = build_avoidance(obstacles, tips, params)
+    first = route(tips, params, obstacles, avoidance=av)
     retry = np.intersect1d(first.unreachable_tips, np.flatnonzero(tips.ok))
     if len(retry) == 0 or len(first.graph) == 0:
         return first
     second = route(
-        subset_tips(tips, retry), params.with_values({"merge_distance": 0.0}), obstacles, first.graph
+        subset_tips(tips, retry),
+        params,  # merging again: retried tips are often many neighbours (a dropped tree)
+        obstacles,
+        attach_to=first.graph,
+        avoidance=av,
     )
     graph, _ = merge_routed(first.graph, second, params, tip_ids=retry)
 

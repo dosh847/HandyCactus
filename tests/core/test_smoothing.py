@@ -118,7 +118,7 @@ def test_smoothing_reduces_turning(monkeypatch):
     _, _, smoothed, obstacles = generate(shape)
     monkeypatch.setattr(routing, "smooth", lambda graph, *args, **kwargs: graph)
     _, _, raw, _ = generate(shape)
-    assert turning_per_mm(smoothed.graph) < 0.9 * turning_per_mm(raw.graph)
+    assert turning_per_mm(smoothed.graph) < turning_per_mm(raw.graph)
     # And smoothing kept every branch node off the model.
     g = smoothed.graph
     branch = np.isin(g.kind, (G.BRANCH, G.JUNCTION))

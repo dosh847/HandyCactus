@@ -91,8 +91,9 @@ def world_bvh(obj, depsgraph, scale_mm: float) -> BVHTree:
 class BVHObstacles:
     """core.spatial.Obstacles over several world-space BVHs (one per target)."""
 
-    def __init__(self, trees: list[BVHTree]):
+    def __init__(self, trees: list[BVHTree], bounds=None):
         self.trees = trees
+        self.bounds = bounds  # (min xyz, max xyz) mm of all targets; enables avoidance
 
     def nearest_distance(self, points: np.ndarray) -> np.ndarray:
         points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
@@ -121,6 +122,36 @@ class BVHObstacles:
                     out[i] = hit[3]
                     normals[i] = hit[1].normalized()
         return out, normals
+
+    def column_occupancy(self, xy: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """(K, N) bool: is (xy[n], z[k]) inside any target. One upward ray walk per column
+        and target, counting entries (+1, face pointing down) and exits (-1)."""
+        xy = np.asarray(xy, np.float64).reshape(-1, 2)
+        z = np.asarray(z, np.float64)
+        out = np.zeros((len(z), len(xy)), dtype=bool)
+        up = Vector((0.0, 0.0, 1.0))
+        z0 = float(z.min()) - 1.0
+        z1 = float(z.max())
+        for n, (x, y) in enumerate(xy.tolist()):
+            for tree in self.trees:
+                heights, signs = [], []
+                o = Vector((x, y, z0))
+                last = -1
+                for _ in range(MAX_CROSSINGS):
+                    hit, normal, index, _d = tree.ray_cast(o, up)
+                    if hit is None or hit.z > z1:
+                        break
+                    if index != last:
+                        heights.append(hit.z)
+                        signs.append(1 if normal.z < 0 else -1)
+                        last = index
+                    o = hit + up * _STEP
+                if not heights:
+                    continue
+                wind = np.cumsum(signs)  # winding just above each crossing
+                k = np.searchsorted(np.asarray(heights), z, side="right") - 1
+                out[:, n] |= (k >= 0) & (wind[np.maximum(k, 0)] > 0)
+        return out
 
 
 def first_hit(trees: list[BVHTree], origin, direction, max_distance: float = 1e9):

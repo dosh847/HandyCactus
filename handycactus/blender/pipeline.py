@@ -142,7 +142,7 @@ def generate(context, objects, support=None) -> GenerateResult:
     depsgraph = context.evaluated_depsgraph_get()
     trees = [world_bvh(ob, depsgraph, scale) for ob in objects]
     found = detection.detect(mesh, params, _testers_from(trees, mesh))  # may raise TooManyContacts
-    obstacles = BVHObstacles(trees)
+    obstacles = BVHObstacles(trees, (mesh.verts.min(axis=0), mesh.verts.max(axis=0)))
     kept = editing.locked_part(read_support_graph(context, support)) if support is not None else None
     contacts = found.contacts
     if kept is not None and len(kept):

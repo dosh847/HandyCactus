@@ -44,6 +44,7 @@ class NumpyInsideTester:
     meshes made of overlapping shells, where crossing parity does not."""
 
     def __init__(self, verts: np.ndarray, tris: np.ndarray):
+        self.bounds = (verts.min(axis=0), verts.max(axis=0)) if len(verts) else None
         self._a = verts[tris[:, 0]]
         self._e1 = verts[tris[:, 1]] - self._a
         self._e2 = verts[tris[:, 2]] - self._a
@@ -99,6 +100,7 @@ class NumpyObstacles:
     """Brute-force Obstacles over triangles; exact, for tests and small meshes."""
 
     def __init__(self, verts: np.ndarray, tris: np.ndarray):
+        self.bounds = (verts.min(axis=0), verts.max(axis=0)) if len(verts) else None
         self._a = verts[tris[:, 0]]
         self._b = verts[tris[:, 1]]
         self._c = verts[tris[:, 2]]
@@ -138,6 +140,46 @@ class NumpyObstacles:
                 j = np.flatnonzero(hit)[np.argmin(t[hit])]
                 out[i], normals[i] = t[j], face_n[j]
         return out, normals
+
+    def column_occupancy(self, xy: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """(K, N) bool: is (xy[n], z[k]) inside the mesh (winding number of a vertical ray
+        > 0; overlapping shells count once)."""
+        return column_occupancy_from_triangles(self._a, self._b, self._c, xy, z)
+
+
+def column_occupancy_from_triangles(a, b, c, xy, z) -> np.ndarray:
+    """Vertical-ray winding numbers: for each column, every triangle whose XY projection
+    holds it crosses it at the barycentric height; a face pointing down is an entry going
+    up (+1), up an exit (-1). Inside where the running sum below a height is > 0."""
+    xy = np.asarray(xy, np.float64).reshape(-1, 2)
+    z = np.asarray(z, np.float64)
+    out = np.zeros((len(z), len(xy)), dtype=bool)
+    nz = np.cross(b - a, c - a)[:, 2]
+    keep = np.abs(nz) > 1e-12  # vertical faces are never crossed by a vertical ray
+    a, b, c, nz = a[keep], b[keep], c[keep], nz[keep]
+    lo = np.minimum(np.minimum(a[:, :2], b[:, :2]), c[:, :2])
+    hi = np.maximum(np.maximum(a[:, :2], b[:, :2]), c[:, :2])
+    for start in range(0, len(xy), 256):
+        p = xy[start : start + 256]
+        cand = np.all((p[:, None, :] >= lo[None] - 1e-12) & (p[:, None, :] <= hi[None] + 1e-12), axis=2)
+        ci, ti = np.nonzero(cand)
+        if len(ci) == 0:
+            continue
+        pa, pb, pc, q = a[ti, :2], b[ti, :2], c[ti, :2], p[ci]
+        d = nz[ti]  # twice the signed XY area
+        w0 = ((pb[:, 0] - q[:, 0]) * (pc[:, 1] - q[:, 1]) - (pb[:, 1] - q[:, 1]) * (pc[:, 0] - q[:, 0])) / d
+        w1 = ((pc[:, 0] - q[:, 0]) * (pa[:, 1] - q[:, 1]) - (pc[:, 1] - q[:, 1]) * (pa[:, 0] - q[:, 0])) / d
+        w2 = 1.0 - w0 - w1
+        inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+        ci, ti, w0, w1, w2 = ci[inside], ti[inside], w0[inside], w1[inside], w2[inside]
+        hz = w0 * a[ti, 2] + w1 * b[ti, 2] + w2 * c[ti, 2]
+        sign = np.where(nz[ti] < 0, 1, -1)  # downward face: entering when going up
+        for k, zk in enumerate(z):
+            wind = np.zeros(len(p), np.int64)
+            below = hz < zk
+            np.add.at(wind, ci[below], sign[below])
+            out[k, start : start + len(p)] |= wind > 0
+    return out
 
 
 def closest_point_on_triangles(p, a, b, c):

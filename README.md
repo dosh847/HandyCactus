@@ -32,8 +32,11 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
 - **Generate Supports**: builds tree supports for the selected meshes, as
   one `<name>_HC_Supports` object driven by Geometry Nodes. It is made of
   tips, knuckle balls, branches merging into trunks, and flared feet.
-  Branches are smoothed and thicken with height below their tallest tip, as
-  in OrcaSlicer and PrusaSlicer organic supports
+  Branches steer around the model to reach the bed, merge into thick trunks
+  as in Bambu Studio's tree supports, and thicken with the tips they carry.
+  Branches that cannot reach the bed merge and stand on the model, at most
+  **Max Landing Diameter** (4 mm) thick. Branches are smoothed as in
+  OrcaSlicer and PrusaSlicer organic supports
   ([notes](docs/research/tree-supports.md)). A contact with no room for a
   tip moves to the nearest spot on the same overhang that has room. Tiny
   self-supporting wrinkles get no contacts, and detection fills any gap the
@@ -105,7 +108,7 @@ pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.8.0.zip
+python tools/extension.py install-check dist/handycactus-0.9.0.zip
 ```
 
 ### Installing for development

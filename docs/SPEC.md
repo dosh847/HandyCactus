@@ -1,7 +1,7 @@
-# HandyCactus — Tree Supports for FDM in Blender (Spec v0.7)
+# HandyCactus — Tree Supports for FDM in Blender (Spec v0.8)
 
-> Status: v0.7. Riser pads, nearly closed meshes, first real test sculpt (2026-10-20).
-> v0.6: M5, 3MF and STL export. v0.5: fewer unreachable contacts
+> Status: v0.8. Bambu-like trees: avoidance grid, merging, load-based radius, landing
+> limits (2026-10-20). v0.7: riser pads, nearly closed meshes, the lich test sculpt. v0.5: fewer unreachable contacts
 > (self-supporting patches, gap fill, tip relocation, routing retry). v0.4 added the tree shape rules from slicer
 > research; v0.3 landing and manual editing (M4).
 
@@ -536,6 +536,80 @@ from 13 to 7 unreachable.
 The figure is a Blender regression test (`tests/blender/test_cloak.py`,
 ≤ 3% unreachable).
 
+### 6.4.4 Bambu-like trees (v0.8)
+Owner feedback on the lich:
+- Too many trees stood on the model: 486 of 552.
+- The trees on the model were huge.
+- The joint above each landing tip showed a wedge-shaped gap.
+- The trees should merge like Bambu Studio's, to print less support.
+
+**Avoidance grid** (`core/avoidance.py`). This is the slicers' avoidance volume
+(`TreeModelVolumes`) on a grid of 0.4 mm cells, the same in XY and Z.
+- **Occupancy** comes from vertical-ray winding numbers (`column_occupancy`;
+  overlapping shells count once).
+- **Distance** to the model is approximated by repeated 3D dilation.
+- **Free space**, per radius bucket, is the cells farther than radius + 0.4 mm.
+- **Reachable** is built upward from the bed. A cell is reachable when it is
+  free and sits above, or one cell beside, a reachable cell one level down.
+  The sideways step is taken only on levels where the cone, at 95% of
+  `max_branch_angle`, gains a whole cell.
+- On the lich the grid builds in 0.6 s, and its volume matches the mesh
+  (24.5 against 24.8 cm³).
+- **How routing uses it:**
+  - A head with the model below it is *blocked* only if the grid says the
+    bed is unreachable. With nothing below it is free, since the grid is
+    conservative next to the model.
+  - Free heads steer to the reachable cell nearest their wish. A
+    redirected move may use the full branch angle.
+  - Thickening never makes the bed unreachable.
+  - Exact clearance moves prefer reachable candidates.
+  - Edits route without the grid, to keep clicks fast.
+
+**Merging.**
+- **Mutual pairs.** Heads pair up closest first, and a pair persists across
+  levels until it merges. Both heads aim for the same midpoint, so they
+  meet. Plain nearest-partner choices are not mutual: in a bundle each head
+  chased another, and 8,626 of 9,773 merge attempts failed the cone check.
+- **Junction position.** A junction is moved to the nearest point every
+  member can reach inside its cone (alternating projections).
+- **Junction radius.** The merged radius is thinned to the room at the
+  junction, but never below its thickest member.
+- **Trapped heads** (no way to the bed) pair with each other and land
+  together.
+- **Routing retry (§6.4.3)** now merges too. The 171 tips retried on the
+  lich had stood as bundles of lone parallel trunks, which was most of the
+  "many thin branches side by side".
+- `merge_distance` is 6 mm (was 3).
+
+**Radius by load.** `radius_at(params, h, tips)` takes the height rule as
+an upper bound, then:
+- follows `branch_radius × sqrt(tips carried)`, so merged cross-sections
+  add up;
+- is never more slender than 40:1 for its height.
+
+So a lone 60 mm branch is 0.75 mm in radius, while a trunk carrying 25 tips
+reaches `max_radius`, now 3 mm (6 mm trunks, the owner's choice). With the
+height rule alone, 6 mm trunks doubled the support volume. Feet are at
+least 1.3 × their trunk's radius.
+
+**Landing limits.**
+- **Diameter:** `max_landing_diameter` is 4 mm. A landing only happens with
+  no way to the bed, so a thicker tree is slimmed to the limit to land
+  anyway. Its landing carries `FLAG_THICK_LANDING`, and the check reports
+  it as a warning (other landings are info).
+- **Joint ball:** the ball above a landing tip is as wide as the branch
+  there. A tip-sized ball left a wedge-shaped gap where the branch and the
+  tip meet at an angle.
+
+**Results on the lich** (before → after):
+- Landings: 486 → 248.
+- Feet: 66 → 29 (median 17 tips per foot).
+- Support volume: 64,600 → 23,000 mm³ (−64%).
+- Unreachable: 33 → 24.
+- Time: 13 s → 13 s.
+- Organic model 1 has more short feet (45 → 66, median 3.7 mm tall): it is
+  lifted only 3 mm, too low to merge.
+
 ### 6.5 Incremental routing
 `route(..., attach_to=graph)` is used for:
 - adding a manual tip;
@@ -686,11 +760,12 @@ Every value still needs tuning against test prints (M2/M6).
 | | `knuckle_diameter` | 0.6 mm | 0.3–3 |
 | Branches | `min_radius` | 0.2 mm (0.4 mm diameter = 2 × nozzle) | ≥ nozzle/2 |
 | | `branch_radius` (end of the tip cone) | 0.6 mm | min–max radius |
-| | `max_radius` | 2.0 mm | 0.4–8 |
-| | `taper_rate` (radius per mm below the tallest tip) | 0.07 mm/mm | 0–0.2 |
+| | `max_radius` | 3.0 mm | 0.4–8 |
+| | `taper_rate` (radius per mm below the tallest tip; an upper bound, §6.4.4) | 0.07 mm/mm | 0–0.2 |
+| | `max_landing_diameter` | 4 mm | 0.4–16 |
 | | `max_branch_angle` (from vertical) | 40° | 0–60 |
 | | `preferred_branch_angle` | 35° | ≤ max |
-| | `merge_distance` | 3.0 mm | 0–20 |
+| | `merge_distance` | 6.0 mm | 0–20 |
 | | `merge_growth` | 1.0 | 0.8–1.3 |
 | | `model_clearance` | 0.8 mm | 0.2–5 |
 | | `step_z` | 0.4 mm | 0.1–2 |
@@ -702,9 +777,9 @@ Every value still needs tuning against test prints (M2/M6).
 
 | Preset | `tip_spacing` | `contact_diameter` | `tip_length` | `knuckle_diameter` | `max_radius` | `foot_radius` |
 |---|---|---|---|---|---|---|
-| *Mini 32 mm* | 1.3 | 0.25 | 1.3 | 0.5 | 1.6 | 1.2 |
-| ***Mini 42 mm* (default)** | 1.5 | 0.3 | 1.5 | 0.6 | 2.0 | 1.5 |
-| *Mini 50 mm* | 1.8 | 0.35 | 1.8 | 0.7 | 2.4 | 1.8 |
+| *Mini 32 mm* | 1.3 | 0.25 | 1.3 | 0.5 | 2.4 | 1.2 |
+| ***Mini 42 mm* (default)** | 1.5 | 0.3 | 1.5 | 0.6 | 3.0 | 1.5 |
+| *Mini 50 mm* | 1.8 | 0.35 | 1.8 | 0.7 | 3.6 | 1.8 |
 
 There is also a *0.4 mm nozzle* variant: it doubles `nozzle_diameter` and
 `min_radius`, and raises the contact diameter to 0.4. Users can save their

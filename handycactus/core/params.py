@@ -14,6 +14,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
 
+import numpy as np
+
 # Display order of the parameter groups in the UI.
 GROUPS: tuple[tuple[str, str], ...] = (
     ("printer", "Printer"),
@@ -195,7 +197,18 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         "Radius a branch widens to just below its tips (a short cone from Min Radius), "
         "before the taper adds to it",
     ),
-    ParamSpec("max_radius", "branches", "Max Radius", 2.0, 0.4, 8.0, "mm", "Largest trunk radius"),
+    ParamSpec("max_radius", "branches", "Max Radius", 3.0, 0.4, 8.0, "mm", "Largest trunk radius"),
+    ParamSpec(
+        "max_landing_diameter",
+        "branches",
+        "Max Landing Diameter",
+        4.0,
+        0.4,
+        16.0,
+        "mm",
+        "Thickest branch that may stand on the model; a thicker one goes to the bed, or is slimmed "
+        "to this and flagged if it has no way there",
+    ),
     ParamSpec(
         "taper_rate",
         "branches",
@@ -230,7 +243,7 @@ PARAM_SPECS: tuple[ParamSpec, ...] = (
         "merge_distance",
         "branches",
         "Merge Distance",
-        3.0,
+        6.0,
         0.0,
         20.0,
         "mm",
@@ -323,6 +336,7 @@ class Params:
     min_radius: float = _default("min_radius")
     branch_radius: float = _default("branch_radius")
     max_radius: float = _default("max_radius")
+    max_landing_diameter: float = _default("max_landing_diameter")
     taper_rate: float = _default("taper_rate")
     max_branch_angle: float = _default("max_branch_angle")
     preferred_branch_angle: float = _default("preferred_branch_angle")
@@ -387,7 +401,7 @@ PRESETS: tuple[Preset, ...] = (
             "tip_length": 1.3,
             "knuckle_diameter": 0.5,
             "branch_radius": 0.5,
-            "max_radius": 1.6,
+            "max_radius": 2.4,
             "foot_radius": 1.2,
         },
     ),
@@ -402,7 +416,7 @@ PRESETS: tuple[Preset, ...] = (
             "tip_length": 1.8,
             "knuckle_diameter": 0.7,
             "branch_radius": 0.7,
-            "max_radius": 2.4,
+            "max_radius": 3.6,
             "foot_radius": 1.8,
         },
     ),
@@ -429,8 +443,23 @@ DEFAULT_PRESET_ID = "MINI_42"
 BRANCH_CONE_RATE = 0.08
 
 
-def radius_at(params: Params, below_top: float) -> float:
-    """Branch radius `below_top` mm under the highest tip it carries."""
+# A branch is never more slender than this (height / diameter), whatever it carries.
+MAX_SLENDERNESS = 40.0
+
+
+def radius_at(params: Params, below_top: float, tips: int | None = None) -> float:
+    """Branch radius `below_top` mm under the highest tip it carries.
+
+    The height rule (tip cone, then taper) is an upper bound. With `tips` (how many tips
+    the branch carries), the radius also follows its load: branch_radius × sqrt(tips),
+    so merged cross-sections add up and a lone tall branch stays thin (Bambu's trees are
+    thick only where many branches have merged); but never more slender than
+    MAX_SLENDERNESS for its height.
+    """
     h = max(below_top, 0.0)
     cone = min(params.branch_radius, params.min_radius + BRANCH_CONE_RATE * h)
-    return min(params.max_radius, max(cone, params.min_radius) + params.taper_rate * h)
+    r = max(cone, params.min_radius) + params.taper_rate * h
+    if tips is not None:
+        load = params.branch_radius * np.sqrt(max(tips, 1))
+        r = max(min(r, load), h / (2 * MAX_SLENDERNESS))
+    return float(min(params.max_radius, max(r, params.min_radius)))

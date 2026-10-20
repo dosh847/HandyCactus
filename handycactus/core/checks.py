@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .graph import CONTACT, FOOT, JUNCTION, KNUCKLE, LANDING, SupportGraph
+from .graph import CONTACT, FLAG_THICK_LANDING, FOOT, JUNCTION, KNUCKLE, LANDING, SupportGraph
 from .heatmap import COVERAGE_FACTOR, covered, estimate_support_faces
 from .mesh_data import MeshData, connected_components
 from .params import Params
@@ -227,11 +227,17 @@ def check_feet(graph: SupportGraph, params: Params) -> list[Finding]:
 
 
 def check_landings(graph: SupportGraph) -> list[Finding]:
-    return [
-        Finding("landing", INFO, f"Tree {graph.tree[n]}: branch lands on the model (leaves a small mark)",
-                tuple(graph.pos[n]))
-        for n in np.flatnonzero(graph.kind == LANDING)
-    ]  # fmt: skip
+    """Landings leave a small mark (info). A tree slimmed to land, because it was thicker
+    than max_landing_diameter with no way to the bed, is a warning."""
+    out = []
+    for n in np.flatnonzero(graph.kind == LANDING):
+        if graph.flags[n] & FLAG_THICK_LANDING:
+            msg = f"Tree {graph.tree[n]}: a thick branch had to land on the model (slimmed to the limit)"
+            out.append(Finding("landing", WARNING, msg, tuple(graph.pos[n])))
+        else:
+            msg = f"Tree {graph.tree[n]}: branch lands on the model (leaves a small mark)"
+            out.append(Finding("landing", INFO, msg, tuple(graph.pos[n])))
+    return out
 
 
 def check_coverage(
