@@ -21,12 +21,21 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
   sits at the lift height.
 - **Overhang Heatmap**: colours the faces of the selected meshes that need
   support (yellow to red). Also available in the viewport Overlays popover.
+  With a support set (or its model) selected, faces its tips hold up turn
+  green and the rest magenta. A tip covers faces near it and at or above its
+  height, never below it.
 - **Preview Contacts**: shows where tips will touch the model (green
   samples, blue islands, magenta uncovered faces on the heatmap).
+- **Contacts and markers** follow the selection: only selected support sets
+  (or sets whose model is selected) show them. The eye button next to the
+  heatmap toggle hides them.
 - **Generate Supports**: builds tree supports for the selected meshes, as
   one `<name>_HC_Supports` object driven by Geometry Nodes. It is made of
-  tips, knuckle balls, branches merging into trunks, and flared feet. Run
-  it again to rebuild the set in place. Red dots mark contacts that could
+  tips, knuckle balls, branches merging into trunks, and flared feet.
+  Branches are smoothed and thicken with height below their tallest tip, as
+  in OrcaSlicer and PrusaSlicer organic supports
+  ([notes](docs/research/tree-supports.md)). Run it again to rebuild the set
+  in place. Red dots mark contacts that could
   not reach the bed.
 - **Clear Supports**: deletes the selected support sets.
 - **Check Supports**: printability checks (also run after every Generate).
@@ -39,8 +48,9 @@ sidebar (N panel) has presets, every parameter and a **Units** setting
   small breakaway tip. Landings are listed as info findings.
 - **Edit Supports**: click the model to add a tip, Ctrl+click a tip to
   delete it, drag a tip along the model or drag a branch node, **L** locks
-  or unlocks the hovered tree, **T** opens per-tip settings, Esc or right
-  click exits. Every edit is one undo step and locks its tree.
+  or unlocks the hovered tree, **T** opens per-tip settings, **Ctrl+Z** /
+  **Ctrl+Shift+Z** undo and redo, Esc or right click exits. Every edit is
+  one undo step and locks its tree.
 - **Lock All / Unlock All**: locked trees are kept when you Generate again.
 
 Paint a vertex group named `HC_Force` to force supports on an area, or
@@ -81,7 +91,7 @@ pip install bpy==5.2.0 pytest
 pytest tests
 python tools/extension.py validate
 python tools/extension.py build            # -> dist/handycactus-<version>.zip
-python tools/extension.py install-check dist/handycactus-0.5.0.zip
+python tools/extension.py install-check dist/handycactus-0.5.1.zip
 ```
 
 ### Installing for development

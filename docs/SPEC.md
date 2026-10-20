@@ -1,6 +1,7 @@
-# HandyCactus — Tree Supports for FDM in Blender (Spec v0.3)
+# HandyCactus — Tree Supports for FDM in Blender (Spec v0.4)
 
-> Status: v0.3. Adds landing on the model and manual editing as built in M4 (2026-10-19).
+> Status: v0.4. Adds the tree shape rules from slicer research, tip-aware coverage and
+> undo in the edit tool (2026-10-20). v0.3 added landing and manual editing (M4).
 
 HandyCactus is a Blender extension that generates **resin-style tree supports
 for FDM printing**: thin, tapered tips that touch the model at points and snap
@@ -150,6 +151,13 @@ asserts it.
    a unit circle profile (`profile_resolution`, default 12) and capped ends.
    Its `Scale` input is fed `hc_radius`; Blender 5.x scales the profile by
    this input rather than by the curve radius.
+   - Edges whose two ends are branch or junction nodes become Catmull-Rom
+     splines with `Curve Smoothness` samples per segment (default 4), so
+     bends render round; the curve still passes through every node. Tips,
+     feet and landing tips stay straight polylines.
+   - The kind test runs on the point domain and is averaged onto edges. Read
+     on edges, Blender averages the integer kind itself (foot 4 + branch 2
+     = 3, a "junction"), which once swung foot rings below the bed.
 2. **Tips** need no special case. The contact node's `hc_radius` is
    `contact_diameter / 2`, so the contact→knuckle tube is a cone. Contact
    nodes sit `penetration` inside the model along `-hc_dir`.
@@ -328,13 +336,12 @@ active node:
    node is *stuck* (it is trapped under the model).
 3. **Merge**: two active nodes merge into a junction when they are within
    `max(r1, r2) + merge_slack` of each other and the merge direction for both
-   stays inside the cone. The new radius is
-   `min(max_radius, sqrt(r1² + r2²) × merge_growth)`. Merging into a
+   stays inside the cone. The new radius is the thicker branch's
+   (`× merge_growth`, capped at `max_radius`); see §6.4.2. Merging into a
    **locked** tree is not allowed in v1, because it would change that tree.
    Branches from different targets **may** merge into one tree.
-4. **Taper**: the radius grows by `taper_rate` mm per mm of descent
-   (default 0.03), clamped to `[min_radius, max_radius]`. Defaults are
-   0.2–2.0 mm radius.
+4. **Radius**: set by the height below the highest tip a branch carries
+   (§6.4.2), clamped to `[min_radius, max_radius]`.
 5. **Landing**: a node that reaches `z ≤ 0` becomes a foot. A node with no
    way to the bed may instead land on the model (§6.4.1).
 6. **Stuck nodes**: a branch that can neither reach the bed nor land is
@@ -376,9 +383,66 @@ the same output.
   rather than only back to its last junction, and all the tips it carried
   are reported unreachable. They are drawn as red markers, and the panel
   shows the count.
-- **Decimation.** After routing, runs of single-child branch nodes that
-  turn less than 3° collapse into one segment (except the node above a
-  foot).
+- **Decimation.** After routing (and smoothing, §6.4.2), runs of
+  single-child branch nodes collapse into longer segments, except the node
+  above a foot or landing. A run is walked top-down, and a segment is
+  extended over the next node while every node it skips stays within
+  0.03 mm of it, counting both position and how much fatter the segment's
+  interpolated radius is than the node's own. (The earlier per-node 3° rule
+  let a collapsed segment fatten past nodes whose growth had been capped
+  near the model.)
+
+### 6.4.2 Tree shape (v0.4, from slicer research)
+Researched in OrcaSlicer (`TreeSupport3D.cpp`, `TreeModelVolumes.cpp`),
+PrusaSlicer 2.8 (`TreeSupport.cpp`, `OrganicSupport.cpp`) and Cura
+(`TreeSupport.cpp`); the notes are in `docs/research/tree-supports.md`.
+
+- **Radius by height below the tallest tip.** Every slicer sets a branch's
+  radius from its distance to the top (`TreeSupportSettings::getRadius`),
+  so a merge does not add area. HandyCactus:
+  `r(h) = min(max_radius, min(branch_radius, min_radius + 0.08·h) + taper_rate·h)`,
+  where `h` is the height below the highest knuckle the branch carries. The
+  short cone from `min_radius` (0.2 mm) to `branch_radius` (0.6 mm) is the
+  slicers' tip cone; `taper_rate` 0.07 mm/mm (about 4°) is their branch
+  diameter angle (Prusa/Orca 5°, Cura 7°). A merge takes the thicker
+  branch's radius, so junctions no longer bulge.
+- Growth stays capped by room to the model (radius ≤ distance − 0.4 mm)
+  and never shrinks going down.
+- **Smoothing** (`core/smoothing.py`), after routing and before
+  decimation. It follows PrusaSlicer's
+  `organic_smooth_branches_avoid_collisions`:
+  - up to 60 iterations;
+  - each movable node moves halfway toward the weighted average of its
+    neighbours, in XY only: children weigh their radius, and the parent
+    weighs as much as all children together;
+  - at most 0.2 mm per iteration;
+  - a move is kept only if the node keeps the hard clearance and does not
+    lose any of its full clearance, and no segment at it leans past
+    `max_branch_angle` (or past its current lean, if that is steeper);
+  - distance changes by at most the step length, so only nodes near the
+    model are queried;
+  - tips, knuckles, landing tips, the break point above a landing, attached
+    roots and the vertical trunk base stay put.
+- **Preferred angle.** Ordinary moves (straight down, toward a merge
+  partner) lean at most `preferred_branch_angle` (35°). Escaping the model
+  and heading for a landing may use `max_branch_angle` (40°). This is
+  Orca/Prusa's slow/fast move.
+  - Their 25° default cost too many merges on minis lifted 3 mm: 43 trees
+    instead of 27 on the Suzanne test. 35° gives 32.
+- **Vertical trunk base.** For the last `TRUNK_BASE_MM` (0.4 mm) above
+  `foot_height`, trunks go straight down: no leaning toward partners, and
+  smoothing leaves the base alone. Orca keeps trunks vertical near the bed.
+- **Measured** on the three organic test models:
+  - mean bend at the remaining bends: 21–22° → 11–14°;
+  - median trunk radius: 0.80 / 1.52 / 2.00 → 0.99 / 1.93 / 2.00 mm;
+  - unreachable contacts: unchanged;
+  - generation: +0.3–0.6 s.
+- **Not adopted yet:**
+  - Two-pass placement through influence areas: the main cure for zig-zag
+    in Cura/Orca/Prusa, but a large change.
+  - Avoidance volumes per layer and radius: the slicers' answer to
+    unreachable contacts.
+  - Brims.
 
 ### 6.4.1 Landing on the model (M4)
 Setting `land_on_model` (default on). The bed is always preferred: a head
@@ -431,6 +495,7 @@ operator is a single undo step.
 | LMB drag on a junction or branch node | Move the node in the view plane (X/Y/Z constraint keys like `G`). Child and parent segments are re-checked for clearance and angle, and turn red if they violate it |
 | L | Toggle lock on the hovered tree |
 | T | Tip settings (per-tip overrides) for the hovered tip |
+| Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) | Undo / redo, one edit at a time (v0.4) |
 | Esc / RMB | Exit |
 
 - Any manual edit to a tree sets the `manual` flag and **locks** the tree
@@ -469,6 +534,12 @@ for confirmation.
   current overrides in the N-panel is not built.
 - Every edit locks the tree it touches and is one undo step. Auto-lock is
   always on (no preference yet).
+- **Undo inside the tool** (v0.4): the tool consumes every key while it
+  runs, so it handles Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y itself. It steps
+  Blender's undo stack and re-reads the graph. Undoing past the tool's
+  start is allowed; undoing Generate removes the supports and ends the
+  tool. `undo_post` and `redo_post` handlers refresh the overlay, inside
+  or outside the tool.
 - **Lock All** / **Unlock All** in the panel, with the locked count.
 - After each edit, the checks run again without the coverage check, which
   needs detection. **Check Supports** runs the full set.
@@ -481,9 +552,28 @@ for confirmation.
 
 - A viewport draw handler (`gpu` module, `POST_VIEW`) draws a colour ramp on
   the faces of every target in the active set, by severity: from "needs
-  support" (yellow) to horizontal (red). Faces that need support but are
-  farther than `tip_spacing` from any contact are drawn in a magenta gap
-  colour, to show coverage gaps.
+  support" (yellow) to horizontal (red).
+- **Coverage** (v0.4). When contacts are known, from Preview Contacts or
+  from the tips of a selected support set, covered faces are drawn green
+  and uncovered ones magenta.
+  - A face is covered when a contact lies within
+    `COVERAGE_FACTOR × tip_spacing` (1.5×) of it and at most one layer
+    (`layer_height`) above it. A tip only holds up what is printed after
+    it, so it never covers faces below its own height.
+  - The coverage check (§10) uses the same rule.
+  - Detection accepts Poisson candidates lowest first, so contacts sit at
+    the bottom of each region with the rest above them. On the organic
+    test model, uncovered faces are about 2%.
+- **Selection** (v0.4). The heatmap covers the selected meshes plus the
+  targets of selected support sets. A support set counts as selected when
+  it, or one of its targets, is selected.
+  - Check markers and previewed contacts are shown only for selected sets.
+    Nothing selected means nothing is shown.
+  - **Show Contacts and Markers** (panel eye toggle, and the Overlays
+    popover) turns them off.
+  - Detection's face mask (which leaves out buried faces) is remembered per
+    support set in memory, so the heatmap of a generated set matches its
+    checks until Blender restarts.
 - **Until M2** there are no support sets yet, so the "active set" is the
   selected mesh objects.
 - **Preview Contacts** runs detection (§6.2) on that set and draws the
@@ -493,7 +583,8 @@ for confirmation.
   - grey for islands removed by `HC_Block`.
 
   The preview is dropped as soon as one of its objects is edited or moved.
-- Unreachable contacts and failed checks are drawn as red markers (M2/M3).
+- Unreachable contacts and failed checks are drawn as red markers (M2/M3),
+  orange for warnings and blue for landings, for selected sets only.
 - The overlay recomputes on a 0.25 s timer (at most 4 times a second),
   never inside the draw callback. Depsgraph updates of the set's objects
   mark it dirty.
@@ -524,9 +615,11 @@ Every value still needs tuning against test prints (M2/M6).
 | | `max_tip_angle` (from -Z) | 45° | 0–80 |
 | | `knuckle_diameter` | 0.6 mm | 0.3–3 |
 | Branches | `min_radius` | 0.2 mm (0.4 mm diameter = 2 × nozzle) | ≥ nozzle/2 |
+| | `branch_radius` (end of the tip cone) | 0.6 mm | min–max radius |
 | | `max_radius` | 2.0 mm | 0.4–8 |
-| | `taper_rate` | 0.03 mm/mm | 0–0.2 |
+| | `taper_rate` (radius per mm below the tallest tip) | 0.07 mm/mm | 0–0.2 |
 | | `max_branch_angle` (from vertical) | 40° | 0–60 |
+| | `preferred_branch_angle` | 35° | ≤ max |
 | | `merge_distance` | 3.0 mm | 0–20 |
 | | `merge_growth` | 1.0 | 0.8–1.3 |
 | | `model_clearance` | 0.8 mm | 0.2–5 |
